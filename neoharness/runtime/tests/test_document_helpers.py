@@ -34,6 +34,7 @@ from neoharness_office.pdf_ops import (  # noqa: E402
     merge as merge_pdf,
     rotate as rotate_pdf,
 )
+from neoharness_office.paths import exact_read_file  # noqa: E402
 from neoharness_office.quality import (  # noqa: E402
     QualityPolicyError,
     artifact_provenance,
@@ -114,6 +115,19 @@ class DocumentHelperTests(unittest.TestCase):
             )
             if macro is not None:
                 archive.writestr("word/vbaProject.bin", macro)
+
+    def test_read_boundary_skips_an_unused_missing_workspace_root(self) -> None:
+        existing = self.root / "output"
+        existing.mkdir()
+        artifact = existing / "artifact.pdf"
+        artifact.write_bytes(b"artifact")
+        self.assertEqual(
+            exact_read_file(
+                artifact,
+                roots=(self.root / "missing-input", existing),
+            ),
+            artifact,
+        )
 
     def test_xlsx_inventory_treats_sheet_as_spatial_artifact(self) -> None:
         path = self.root / "irregular.xlsx"

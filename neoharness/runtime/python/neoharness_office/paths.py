@@ -27,7 +27,14 @@ def _inside(path: Path, root: Path) -> bool:
 
 
 def _inside_any(path: Path, roots: tuple[Path, ...]) -> bool:
-    return any(_inside(path, root.resolve(strict=True)) for root in roots)
+    for root in roots:
+        try:
+            resolved_root = root.resolve(strict=True)
+        except FileNotFoundError:
+            continue
+        if _inside(path, resolved_root):
+            return True
+    return False
 
 
 def exact_read_file(raw: str | Path, *, roots: tuple[Path, ...] = READ_ROOTS) -> Path:
