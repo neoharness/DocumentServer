@@ -8,9 +8,6 @@ ARG SOURCE_DATE_EPOCH=0
 FROM ubuntu:24.04 AS payload
 
 ARG BUILD_ROOT
-ARG NHO_RUNTIME_VERSION
-ARG NHO_SOURCE_REVISION
-ARG SOURCE_DATE_EPOCH
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV NHO_ROOT=/opt/neoharness-office/documentserver
@@ -78,6 +75,12 @@ COPY sdkjs/pdf/apiBuilder.js \
 COPY LICENSE /opt/neoharness-office/share/licenses/AGPL-3.0.txt
 COPY core/LICENSE.txt /opt/neoharness-office/share/licenses/core-LICENSE.txt
 COPY sdkjs/LICENSE.txt /opt/neoharness-office/share/licenses/sdkjs-LICENSE.txt
+
+# Keep release identity below dependency installation and static runtime assets
+# so a new source revision does not invalidate those expensive layers.
+ARG NHO_RUNTIME_VERSION
+ARG NHO_SOURCE_REVISION
+ARG SOURCE_DATE_EPOCH
 
 RUN printf '%s\n' "${NHO_RUNTIME_VERSION}" \
         > /opt/neoharness-office/VERSION \
