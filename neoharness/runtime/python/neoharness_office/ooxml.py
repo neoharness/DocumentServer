@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import math
 import os
@@ -33,6 +34,8 @@ COLOR_HEX = re.compile(r"^(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$")
 MAX_PACKAGE_ENTRIES = 100_000
 MAX_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 
+_NAMESPACE_MAPS: dict[int, tuple[tuple[str, str], ...]] = {}
+
 for prefix, uri in (
     ("w", W),
     ("a", A),
@@ -54,7 +57,13 @@ def _xml(data: bytes, part: str) -> ET.Element:
             f"OOXML part contains a prohibited document type: {part}"
         )
     try:
-        return ET.fromstring(data)
+        namespaces: list[tuple[str, str]] = []
+        for _, declaration in ET.iterparse(io.BytesIO(data), events=("start-ns",)):
+            if declaration not in namespaces:
+                namespaces.append(declaration)
+        root = ET.fromstring(data)
+        _NAMESPACE_MAPS[id(root)] = tuple(namespaces)
+        return root
     except ET.ParseError as exc:
         raise OoxmlMutationError(
             f"OOXML part is not well formed: {part}: {exc}"
@@ -62,7 +71,38 @@ def _xml(data: bytes, part: str) -> ET.Element:
 
 
 def _serialized(root: ET.Element) -> bytes:
-    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    namespaces = _NAMESPACE_MAPS.get(id(root), ())
+    for prefix, uri in namespaces:
+        if prefix == "xml":
+            continue
+        try:
+            ET.register_namespace(prefix, uri)
+        except ValueError:
+            # ElementTree reserves generated prefixes such as ns0.  They do
+            # not need registration, but the declaration is still restored
+            # below when it was present on the source root.
+            pass
+    encoded = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    root_start = encoded.find(b"<", encoded.find(b"?>") + 2)
+    root_end = encoded.find(b">", root_start)
+    if root_start < 0 or root_end < 0:
+        raise OoxmlMutationError("serialized OOXML part has no document element")
+    declarations: list[bytes] = []
+    opening = encoded[root_start:root_end]
+    for prefix, uri in namespaces:
+        name = b"xmlns" if not prefix else f"xmlns:{prefix}".encode("utf-8")
+        if name + b"=" in opening:
+            continue
+        escaped = (
+            uri.replace("&", "&amp;")
+            .replace('"', "&quot;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+        declarations.append(b" " + name + b'="' + escaped.encode("utf-8") + b'"')
+    if declarations:
+        encoded = encoded[:root_end] + b"".join(declarations) + encoded[root_end:]
+    return encoded
 
 
 def _validated_archive(path: Path) -> zipfile.ZipFile:

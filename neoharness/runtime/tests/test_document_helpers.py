@@ -84,7 +84,11 @@ class DocumentHelperTests(unittest.TestCase):
           <Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/>
         </Relationships>"""
         marker = "2" if changed else "1"
-        sheet = f"""<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        sheet = f"""<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+          mc:Ignorable="x14ac xr2"
+          xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac"
+          xmlns:xr2="http://schemas.microsoft.com/office/spreadsheetml/2015/revision2">
           <dimension ref="A1:F8"/><sheetData>
             <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><v>{marker}</v></c></row>
             <row r="2"><c r="A2"><f>{formula}</f><v>{int(marker) * 2}</v></c></row>
@@ -408,6 +412,10 @@ class DocumentHelperTests(unittest.TestCase):
                 before.read("xl/printerSettings/printerSettings1.bin"),
                 after.read("xl/printerSettings/printerSettings1.bin"),
             )
+            serialized_sheet = after.read("xl/worksheets/sheet1.xml")
+            self.assertIn(b'mc:Ignorable="x14ac xr2"', serialized_sheet)
+            self.assertIn(b'xmlns:x14ac="http://schemas.microsoft.com/', serialized_sheet)
+            self.assertIn(b'xmlns:xr2="http://schemas.microsoft.com/', serialized_sheet)
         comparison = result["comparison"]
         self.assertEqual(comparison["spreadsheet"]["formulas"]["count"], 0)
         self.assertEqual(comparison["spreadsheet"]["sheet_states"]["count"], 1)
