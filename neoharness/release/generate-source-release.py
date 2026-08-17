@@ -84,9 +84,57 @@ def submodule_paths(repo: Path) -> list[str]:
     return paths
 
 
-def remote_url(repo: Path) -> str | None:
-    value = git(repo, "config", "--get", "remote.origin.url", check=False)
-    return value or None
+def configured_submodule_url(repo: Path, configured_path: str) -> str:
+    """Return the canonical URL recorded by the parent superproject.
+
+    A checkout's local ``origin`` is operator state: it may still name an
+    upstream repository after the superproject has deliberately moved a
+    gitlink to a fork.  Corresponding-source metadata must instead describe
+    the immutable checkout coordinates encoded in the parent's
+    ``.gitmodules`` file.
+    """
+
+    modules = repo / ".gitmodules"
+    result = run(
+        "git",
+        "config",
+        "--file",
+        str(modules),
+        "--get-regexp",
+        r"^submodule\..*\.path$",
+        cwd=repo,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise ReleaseError(result.stderr.strip())
+    assert isinstance(result.stdout, str)
+    for line in result.stdout.splitlines():
+        key, value = line.split(None, 1)
+        if value != configured_path:
+            continue
+        url_key = f"{key[:-len('.path')]}.url"
+        url_result = run(
+            "git",
+            "config",
+            "--file",
+            str(modules),
+            "--get",
+            url_key,
+            cwd=repo,
+            check=False,
+        )
+        if url_result.returncode != 0:
+            raise ReleaseError(
+                f"submodule URL is missing for configured path: {configured_path}"
+            )
+        assert isinstance(url_result.stdout, str)
+        url = url_result.stdout.strip()
+        if not url:
+            raise ReleaseError(
+                f"submodule URL is empty for configured path: {configured_path}"
+            )
+        return url
+    raise ReleaseError(f"submodule path is not configured: {configured_path}")
 
 
 def collect_submodules(root: Path) -> list[dict[str, Any]]:
@@ -116,7 +164,7 @@ def collect_submodules(root: Path) -> list[dict[str, Any]]:
                 {
                     "path": display.as_posix(),
                     "commit": actual,
-                    "remote": remote_url(checkout),
+                    "remote": configured_submodule_url(repo, configured),
                 }
             )
             walk(checkout, display)
