@@ -142,6 +142,18 @@ class ServerAttestationTests(unittest.TestCase):
 
         self.assertEqual(lineage[0]["authority"], "approved_output")
 
+    def test_office_discovery_commands_do_not_require_artifact_evidence(self) -> None:
+        for argv in (
+            ["--help"],
+            ["run", "--help"],
+            ["--version"],
+            ["examples", "xlsx-revise"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertIsNone(
+                    attestation._execution_evidence("office", argv, b"guidance\n")
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

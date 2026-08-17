@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
@@ -90,6 +91,27 @@ class LauncherContractTests(unittest.TestCase):
         outside.write_bytes(b"outside")
         with self.assertRaisesRegex(nh_office.ContractError, "must remain beneath"):
             nh_office._exact_input(str(outside), self.input, label="input")
+
+    def test_help_and_examples_are_useful_without_a_workspace_manifest(self) -> None:
+        help_result = subprocess.run(
+            [sys.executable, str(LAUNCHER), "--help"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertIn("nh-office examples xlsx-revise", help_result.stdout)
+        self.assertIn("cell-apiBuilder.js", help_result.stdout)
+
+        example_result = subprocess.run(
+            [sys.executable, str(LAUNCHER), "examples", "xlsx-revise"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertIn('builder.OpenFile("jsValue(inputPath)")', example_result.stdout)
+        self.assertIn("SetFillColor", example_result.stdout)
 
     def test_output_rejects_escape_and_symlink(self) -> None:
         outside = self.root / "outside.docx"

@@ -193,6 +193,8 @@ def _json_file(path: Path) -> object:
 
 def _execution_evidence(tool: str, argv: Sequence[str], stdout: bytes) -> object:
     if tool == "office":
+        if _informational_invocation(tool, argv):
+            return None
         manifest = _option_value(argv, "--manifest")
         path = Path(manifest or "/workspace/output/nh-office-manifest.json")
         return _json_file(_exact_output(str(path)))
@@ -207,6 +209,17 @@ def _execution_evidence(tool: str, argv: Sequence[str], stdout: bytes) -> object
         # Read-only helpers need no publication evidence. A successful
         # mutating helper without structured provenance simply records none.
         return None
+
+
+def _informational_invocation(tool: str, argv: Sequence[str]) -> bool:
+    """Return whether a successful invocation cannot materialize an artifact."""
+
+    if tool != "office":
+        return False
+    return bool(
+        any(item in {"-h", "--help", "--version"} for item in argv)
+        or (argv and argv[0] == "examples")
+    )
 
 
 def _provenances(value: object) -> list[Mapping[str, Any]]:
