@@ -62,6 +62,12 @@ finalizer broker. Do not call `/opt/neoharness-office/bin/nh-office` or
 available for package recovery but intentionally produces no server
 attestation and therefore cannot be published.
 
+Every Office/PDF source passed to a finalizer must be declared as an input.
+The gateway seals canonical `/workspace/input` bytes before selected-agent
+execution begins, and the broker also recognizes unchanged outputs from prior
+approved finalizers. It rejects unsealed working-document inputs, including a
+lossy serializer's output reopened only to acquire native provenance.
+
 Raw, version-matched API Builder sources are installed at:
 
 ```text

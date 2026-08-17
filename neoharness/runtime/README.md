@@ -118,6 +118,15 @@ file in `/workspace` can never substitute for the broker's observation. The
 direct engine entry points remain in the package for build and recovery, but
 bytes produced by bypassing the broker have no publication authority.
 
+The gateway seals every canonical `/workspace/input` file with
+`nh-input-attest` immediately after its streamed hash and byte count match.
+Document finalizers must declare each Office/PDF source through their normal
+arguments. The broker accepts a declared source only when it is still the
+sealed gateway input or an unchanged output of an earlier approved finalizer.
+An Office/PDF file produced in `/workspace/work` by LibreOffice, Pandoc, or a
+generic serializer cannot be reopened merely to launder it into qualified
+publication bytes.
+
 Images enter the same workspace unchanged and can be inspected or transformed
 without weakening the original-file boundary:
 

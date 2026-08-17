@@ -117,10 +117,12 @@ RUN ln -s /opt/neoharness-office/bin/nh-office /usr/bin/nh-office \
     && ln -s /opt/neoharness-office/bin/nh-document /usr/bin/nh-document \
     && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-office-attested \
     && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-document-attested \
+    && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-input-attest \
     && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-artifact-qualify \
     && find /opt/neoharness-office /usr/bin/nh-office \
         /usr/bin/nh-document /usr/bin/nh-office-attested \
-        /usr/bin/nh-document-attested /usr/bin/nh-artifact-qualify \
+        /usr/bin/nh-document-attested /usr/bin/nh-input-attest \
+        /usr/bin/nh-artifact-qualify \
         -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
 
 # Prove the assembled filesystem can execute the source-built engine before it
@@ -194,6 +196,8 @@ RUN mkdir -p /rootfs/usr/bin /rootfs/lib/systemd/system \
     && ln -s /opt/neoharness-office/bin/nh-attested \
         /rootfs/usr/bin/nh-document-attested \
     && ln -s /opt/neoharness-office/bin/nh-attested \
+        /rootfs/usr/bin/nh-input-attest \
+    && ln -s /opt/neoharness-office/bin/nh-attested \
         /rootfs/usr/bin/nh-artifact-qualify \
     && cp /rootfs/opt/neoharness-office/share/systemd/nh-office-finalizerd.service \
         /rootfs/lib/systemd/system/nh-office-finalizerd.service
@@ -251,6 +255,7 @@ RUN ln -s /opt/neoharness-office/bin/nh-office /usr/bin/nh-office \
     && ln -s /opt/neoharness-office/bin/nh-document /usr/bin/nh-document \
     && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-office-attested \
     && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-document-attested \
+    && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-input-attest \
     && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-artifact-qualify
 
 LABEL org.opencontainers.image.title="neoHarness Office headless runtime" \

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,7 @@ import time
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
-from .paths import OUTPUT_ROOT, exact_read_file, file_fact
+from .paths import INPUT_ROOT, OUTPUT_ROOT, WORK_ROOT, exact_read_file, file_fact
 from .quality import (
     PROVENANCE_SCHEMA,
     QualityPolicyError,
@@ -35,6 +36,30 @@ MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_STREAM_BYTES = 8 * 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = 900
 ATTESTATION_SCHEMA = "ai.neoharness.office.server-attestation.v1"
+INPUT_ATTESTATION_SCHEMA = "ai.neoharness.office.input-attestation.v1"
+DOCUMENT_EXTENSIONS = {
+    ".docx",
+    ".docm",
+    ".dotx",
+    ".dotm",
+    ".xlsx",
+    ".xlsm",
+    ".xltx",
+    ".xltm",
+    ".pptx",
+    ".pptm",
+    ".potx",
+    ".potm",
+    ".ppsx",
+    ".ppsm",
+    ".vsdx",
+    ".vssx",
+    ".vstx",
+    ".vstm",
+    ".vssm",
+    ".vsdm",
+    ".pdf",
+}
 
 
 class AttestationError(ValueError):
@@ -209,6 +234,156 @@ class AttestationStore:
     def prepare(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.root, 0o700)
+        self.input_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.input_root, 0o700)
+
+    @property
+    def input_root(self) -> Path:
+        return self.root / "inputs"
+
+    def seal_input(
+        self,
+        *,
+        path: object,
+        expected_sha256: object,
+        expected_size: object,
+    ) -> dict[str, object]:
+        if not isinstance(path, str):
+            raise AttestationError("input path must be a string")
+        if (
+            not isinstance(expected_sha256, str)
+            or len(expected_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in expected_sha256)
+            or isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+        ):
+            raise AttestationError("input receipt is invalid")
+        source = exact_read_file(path, roots=(INPUT_ROOT,))
+        actual = file_fact(source)
+        if (
+            actual["sha256"] != expected_sha256
+            or actual["size"] != expected_size
+        ):
+            raise AttestationError("input bytes do not match the gateway receipt")
+        record = {
+            "schema": INPUT_ATTESTATION_SCHEMA,
+            "recorded_at_unix_ms": time.time_ns() // 1_000_000,
+            "artifact": actual,
+        }
+        record_path = self._input_record_path(source)
+        if record_path.is_file():
+            existing = _json_file(record_path)
+            if (
+                not isinstance(existing, Mapping)
+                or existing.get("schema") != INPUT_ATTESTATION_SCHEMA
+                or existing.get("artifact") != actual
+            ):
+                raise AttestationError("sealed input identity cannot change")
+        else:
+            self._write_value(record_path, record)
+        return {"ok": True, "input_attestation": record}
+
+    def validate_declared_inputs(
+        self, *, tool: str, argv: Sequence[str]
+    ) -> list[dict[str, object]]:
+        paths = self._declared_document_paths(tool=tool, argv=argv)
+        return [self._validate_document_input(path) for path in paths]
+
+    def _declared_document_paths(
+        self, *, tool: str, argv: Sequence[str]
+    ) -> list[Path]:
+        candidates: list[str] = []
+        if tool == "office":
+            index = 0
+            while index < len(argv):
+                item = argv[index]
+                if item == "--input":
+                    if index + 1 >= len(argv):
+                        raise AttestationError("--input requires a value")
+                    candidates.append(argv[index + 1])
+                    index += 2
+                    continue
+                if item.startswith("--input="):
+                    candidates.append(item.split("=", 1)[1])
+                index += 1
+        else:
+            candidates.extend(
+                item
+                for item in argv
+                if item.startswith("/") and Path(item).suffix.lower() in DOCUMENT_EXTENSIONS
+            )
+        result: list[Path] = []
+        for raw in candidates:
+            path = Path(raw)
+            if path.suffix.lower() not in DOCUMENT_EXTENSIONS:
+                continue
+            if not path.exists() and not path.is_symlink():
+                continue
+            resolved = exact_read_file(
+                path, roots=(INPUT_ROOT, WORK_ROOT, OUTPUT_ROOT)
+            )
+            if resolved not in result:
+                result.append(resolved)
+        return result
+
+    def _validate_document_input(self, path: Path) -> dict[str, object]:
+        actual = file_fact(path)
+        if _inside(path, INPUT_ROOT.resolve(strict=True)):
+            record_path = self._input_record_path(path)
+            if not record_path.is_file():
+                raise AttestationError("document input was not sealed by the gateway")
+            record = _json_file(record_path)
+            if (
+                not isinstance(record, Mapping)
+                or record.get("schema") != INPUT_ATTESTATION_SCHEMA
+                or record.get("artifact") != actual
+            ):
+                raise AttestationError("sealed document input bytes changed")
+            return {"authority": "gateway_input", "artifact": actual}
+        if _inside(path, OUTPUT_ROOT.resolve(strict=True)):
+            if not self._has_approved_artifact_record(actual):
+                raise AttestationError(
+                    "document output input lacks approved finalizer lineage"
+                )
+            return {"authority": "approved_output", "artifact": actual}
+        if _inside(path, WORK_ROOT.resolve(strict=True)):
+            raise AttestationError(
+                "working document bytes cannot become finalizer input"
+            )
+        raise AttestationError("document input escaped the workspace authority roots")
+
+    def _has_approved_artifact_record(self, actual: Mapping[str, Any]) -> bool:
+        for record_path in self.root.glob("*.json"):
+            try:
+                record = _json_file(record_path)
+            except AttestationError:
+                continue
+            if (
+                not isinstance(record, Mapping)
+                or record.get("schema") != ATTESTATION_SCHEMA
+            ):
+                continue
+            if record.get("artifact") != actual:
+                continue
+            provenance = record.get("provenance")
+            if not isinstance(provenance, Mapping):
+                continue
+            for intent in ("create", "revise", "derived"):
+                try:
+                    qualify_artifact(
+                        Path(str(actual["path"])),
+                        intent=intent,
+                        provenance=provenance,
+                    )
+                except QualityPolicyError:
+                    continue
+                return True
+        return False
+
+    def _input_record_path(self, path: Path) -> Path:
+        identity = hashlib.sha256(str(path).encode()).hexdigest()
+        return self.input_root / f"{identity}.json"
 
     def record(
         self,
@@ -217,6 +392,7 @@ class AttestationStore:
         tool: str,
         argv: Sequence[str],
         evidence: object,
+        input_lineage: Sequence[Mapping[str, object]] = (),
     ) -> list[str]:
         policy, identity = load_policy()
         finalizers = policy.get("finalizers")
@@ -244,6 +420,7 @@ class AttestationStore:
                 "observed_uid": uid,
                 "tool": tool,
                 "argv": list(argv),
+                "input_lineage": [dict(item) for item in input_lineage],
                 "recorded_at_unix_ms": time.time_ns() // 1_000_000,
                 "provenance": dict(provenance),
                 "artifact": actual,
@@ -253,9 +430,14 @@ class AttestationStore:
         return recorded
 
     def _write(self, record_id: str, value: object) -> None:
+        self._write_value(self.root / f"{record_id}.json", value)
+
+    def _write_value(self, target_path: Path, value: object) -> None:
         self.prepare()
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-        descriptor, temporary_name = tempfile.mkstemp(prefix=".record-", dir=self.root)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".record-", dir=target_path.parent
+        )
         temporary = Path(temporary_name)
         try:
             os.fchmod(descriptor, 0o600)
@@ -263,7 +445,7 @@ class AttestationStore:
                 target.write(encoded)
                 target.flush()
                 os.fsync(target.fileno())
-            os.replace(temporary, self.root / f"{record_id}.json")
+            os.replace(temporary, target_path)
         finally:
             if temporary.exists():
                 temporary.unlink()
@@ -323,6 +505,12 @@ class AttestationService:
         if not isinstance(request, Mapping):
             raise AttestationError("request must be an object")
         operation = request.get("operation")
+        if operation == "seal_input":
+            return self.store.seal_input(
+                path=request.get("path"),
+                expected_sha256=request.get("sha256"),
+                expected_size=request.get("size"),
+            )
         if operation == "qualify":
             return self.store.qualify(
                 artifact=request.get("artifact"),
@@ -340,6 +528,9 @@ class AttestationService:
             or sum(len(item.encode()) for item in argv) > MAX_REQUEST_BYTES // 2
         ):
             raise AttestationError("finalizer arguments exceed their bound")
+        input_lineage = self.store.validate_declared_inputs(
+            tool=str(tool), argv=argv
+        )
         exit_code, stdout, stderr, stdout_truncated, stderr_truncated = _bounded_process(
             [self.commands[str(tool)], *argv],
             uid=uid,
@@ -355,6 +546,7 @@ class AttestationService:
                     tool=str(tool),
                     argv=argv,
                     evidence=evidence,
+                    input_lineage=input_lineage,
                 )
         return {
             "ok": exit_code == 0,
@@ -465,6 +657,25 @@ def client_main() -> int:
         tool = "office"
     elif invoked in {"nh-document", "nh-document-attested"}:
         tool = "document"
+    elif invoked == "nh-input-attest":
+        parser = argparse.ArgumentParser(prog=invoked)
+        parser.add_argument("--input", required=True)
+        parser.add_argument("--sha256", required=True)
+        parser.add_argument("--size", required=True, type=int)
+        arguments = parser.parse_args()
+        result = _request(
+            {
+                "operation": "seal_input",
+                "path": arguments.input,
+                "sha256": arguments.sha256,
+                "size": arguments.size,
+            }
+        )
+        if result.get("ok") is not True:
+            print(result.get("error", "input attestation failed"), file=sys.stderr)
+            return 65
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 0
     elif invoked == "nh-artifact-qualify":
         parser = argparse.ArgumentParser(prog=invoked)
         parser.add_argument("--artifact", required=True)
@@ -505,6 +716,7 @@ def client_main() -> int:
 
 __all__ = [
     "ATTESTATION_ROOT",
+    "INPUT_ATTESTATION_SCHEMA",
     "SOCKET_PATH",
     "AttestationError",
     "AttestationServer",
