@@ -74,18 +74,25 @@ for format in docx xlsx pptx; do
         --manifest "/workspace/output/40-convert-${format}.json"
 done
 
-set +e
 run_office /workspace/work/31-edit-pdf.js \
     --input /workspace/input/runtime-original.pdf \
     --output /workspace/output/runtime-edited.pdf \
     --manifest /workspace/output/31-edit-pdf.json
-pdf_edit_rc=$?
-set -e
 
-if [ "${pdf_edit_rc}" -ne 70 ]; then
-    echo "expected existing-PDF edit to expose engine gap as exit 70; got ${pdf_edit_rc}" >&2
+qpdf --check "${workspace}/output/runtime-edited.pdf"
+if cmp -s "${workspace}/output/runtime-original.pdf" \
+    "${workspace}/output/runtime-edited.pdf"; then
+    echo "existing-PDF edit returned unchanged bytes" >&2
     exit 1
 fi
 
-printf 'native smoke complete; existing-PDF edit gap reproduced as exit %s\n' \
-    "${pdf_edit_rc}"
+pdftotext "${workspace}/output/runtime-original.pdf" \
+    "${workspace}/output/runtime-original.txt"
+pdftotext "${workspace}/output/runtime-edited.pdf" \
+    "${workspace}/output/runtime-edited.txt"
+grep -Fq 'NHO_RUNTIME_PDF_ORIGINAL' \
+    "${workspace}/output/runtime-edited.txt"
+grep -Fq 'NHO_RUNTIME_PDF_EDITED' \
+    "${workspace}/output/runtime-edited.txt"
+
+printf 'native smoke complete; existing-PDF edit passed\n'
