@@ -1,0 +1,10 @@
+builder.CreateFile("xlsx");
+var oSheet = Api.GetActiveSheet();
+oSheet.SetName("Runtime");
+oSheet.GetRange("A1").SetValue("NHO_RUNTIME_XLSX_ORIGINAL");
+oSheet.GetRange("B1").SetValue(21);
+oSheet.GetRange("B2").SetValue(2);
+oSheet.GetRange("B3").SetValue("=B1*B2");
+var outputPath = Argument["output"];
+builder.SaveFile("xlsx", "jsValue(outputPath)");
+builder.CloseFile();

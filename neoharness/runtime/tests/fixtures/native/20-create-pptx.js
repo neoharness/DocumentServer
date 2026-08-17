@@ -1,0 +1,13 @@
+builder.CreateFile("pptx");
+var oPresentation = Api.GetPresentation();
+var oSlide = oPresentation.GetSlideByIndex(0);
+oSlide.RemoveAllObjects();
+var oFill = Api.CreateSolidFill(Api.RGB(27, 102, 201));
+var oStroke = Api.CreateStroke(0, Api.CreateNoFill());
+var oShape = Api.CreateShape("roundRect", 220 * 36000, 55 * 36000, oFill, oStroke);
+oShape.SetPosition(30 * 36000, 35 * 36000);
+oShape.GetContent().GetElement(0).AddText("NHO_RUNTIME_PPTX_ORIGINAL");
+oSlide.AddObject(oShape);
+var outputPath = Argument["output"];
+builder.SaveFile("pptx", "jsValue(outputPath)");
+builder.CloseFile();

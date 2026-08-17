@@ -1,0 +1,422 @@
+#!/usr/bin/python3
+"""Thin, deterministic launcher for the neoHarness Office native runtime."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import mimetypes
+import os
+from pathlib import Path
+import selectors
+import signal
+import stat
+import subprocess
+import sys
+import time
+from typing import Sequence
+
+
+WORKSPACE_ROOT = Path("/workspace")
+INPUT_ROOT = WORKSPACE_ROOT / "input"
+WORK_ROOT = WORKSPACE_ROOT / "work"
+OUTPUT_ROOT = WORKSPACE_ROOT / "output"
+DEFAULT_MANIFEST = OUTPUT_ROOT / "nh-office-manifest.json"
+DEFAULT_TIMEOUT_SECONDS = 600.0
+DEFAULT_DIAGNOSTIC_LIMIT = 64 * 1024
+
+EXIT_USAGE = 64
+EXIT_DATA = 65
+EXIT_ENGINE = 70
+EXIT_TIMEOUT = 124
+EXIT_SIGNAL = 143
+
+
+class ContractError(ValueError):
+    """Raised when a caller violates the local workspace contract."""
+
+
+def _install_root() -> Path:
+    return Path(os.environ.get("NHO_INSTALL_ROOT", "/opt/neoharness-office"))
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _exact_input(raw: str, root: Path, *, label: str) -> Path:
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ContractError(f"{label} must be an absolute path beneath {root}")
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ContractError(f"{label} does not exist: {path}") from exc
+    if not _is_within(resolved, root):
+        raise ContractError(f"{label} must remain beneath {root}")
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ContractError(f"{label} must be a regular file and not a symlink")
+    return resolved
+
+
+def _exact_output(raw: str, *, label: str) -> Path:
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ContractError(f"{label} must be an absolute path beneath {OUTPUT_ROOT}")
+    parent = path.parent.resolve(strict=True)
+    resolved = parent / path.name
+    if not _is_within(resolved, OUTPUT_ROOT):
+        raise ContractError(f"{label} must remain beneath {OUTPUT_ROOT}")
+    if path.exists() or path.is_symlink():
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise ContractError(f"{label} may only replace a regular file")
+    return resolved
+
+
+def _load_argument(path: str | None) -> object:
+    if path is None:
+        return {}
+    argument_path = _exact_input(path, WORK_ROOT, label="argument")
+    try:
+        with argument_path.open("r", encoding="utf-8") as source:
+            return json.load(source)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError(f"argument must contain valid UTF-8 JSON: {exc}") from exc
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _mime_type(path: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["file", "--brief", "--mime-type", "--", str(path)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+        )
+        value = result.stdout.strip()
+        if value:
+            return value
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+
+def _append_bounded(target: bytearray, chunk: bytes, limit: int) -> None:
+    remaining = limit - len(target)
+    if remaining > 0:
+        target.extend(chunk[:remaining])
+
+
+def _terminate_group(process: subprocess.Popen[bytes], grace_seconds: float = 2.0) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    process.wait()
+
+
+def _run_bounded(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_seconds: float,
+    diagnostic_limit: int,
+) -> tuple[int, bytes, bytes, int, int, bool]:
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        env=env,
+        start_new_session=True,
+    )
+    assert process.stdout is not None
+    assert process.stderr is not None
+
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+
+    captured = {"stdout": bytearray(), "stderr": bytearray()}
+    totals = {"stdout": 0, "stderr": 0}
+    deadline = time.monotonic() + timeout_seconds
+    timed_out = False
+
+    while selector.get_map():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            _terminate_group(process)
+            remaining = 0
+        events = selector.select(timeout=min(max(remaining, 0), 0.25))
+        if not events and process.poll() is not None:
+            events = [(key, selectors.EVENT_READ) for key in selector.get_map().values()]
+        for key, _ in events:
+            stream = key.fileobj
+            chunk = os.read(stream.fileno(), 64 * 1024)
+            if not chunk:
+                selector.unregister(stream)
+                stream.close()
+                continue
+            name = key.data
+            totals[name] += len(chunk)
+            _append_bounded(captured[name], chunk, diagnostic_limit)
+
+    if process.poll() is None:
+        if timed_out:
+            _terminate_group(process)
+        else:
+            process.wait()
+
+    return (
+        EXIT_TIMEOUT if timed_out else int(process.returncode or 0),
+        bytes(captured["stdout"]),
+        bytes(captured["stderr"]),
+        totals["stdout"],
+        totals["stderr"],
+        timed_out,
+    )
+
+
+def _artifact(path: Path) -> dict[str, object]:
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ContractError(f"produced output is not a regular no-follow file: {path}")
+    resolved = path.resolve(strict=True)
+    if not _is_within(resolved, OUTPUT_ROOT):
+        raise ContractError(f"produced output escaped {OUTPUT_ROOT}: {path}")
+    return {
+        "path": str(path),
+        "name": path.name,
+        "size": info.st_size,
+        "sha256": _sha256(path),
+        "mime_type": _mime_type(path),
+    }
+
+
+def _write_json_atomic(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    encoded = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    with temporary.open("x", encoding="utf-8") as target:
+        target.write(encoded)
+        target.flush()
+        os.fsync(target.fileno())
+    os.replace(temporary, path)
+
+
+def _version() -> str:
+    path = _install_root() / "VERSION"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "development"
+
+
+def _run(args: argparse.Namespace) -> int:
+    started = time.monotonic()
+    try:
+        script = _exact_input(args.script, WORK_ROOT, label="script")
+        inputs = [_exact_input(item, INPUT_ROOT, label="input") for item in args.input]
+        outputs = [_exact_output(item, label="output") for item in args.output]
+        if not outputs:
+            raise ContractError("at least one --output is required")
+        manifest_path = _exact_output(args.manifest, label="manifest")
+        user_argument = _load_argument(args.argument)
+    except (ContractError, OSError) as exc:
+        print(f"nh-office: {exc}", file=sys.stderr)
+        return EXIT_DATA
+
+    runtime_root = _install_root() / "documentserver"
+    binary_root = runtime_root / "server" / "FileConverter" / "bin"
+    docbuilder = binary_root / "docbuilder"
+    if not docbuilder.is_file():
+        print(f"nh-office: runtime binary is missing: {docbuilder}", file=sys.stderr)
+        return EXIT_ENGINE
+
+    engine_argument = {
+        "input": str(inputs[0]) if inputs else None,
+        "inputs": [str(item) for item in inputs],
+        "output": str(outputs[0]),
+        "outputs": [str(item) for item in outputs],
+        "argument": user_argument,
+    }
+    compact_argument = json.dumps(engine_argument, separators=(",", ":"), ensure_ascii=False)
+
+    env = dict(os.environ)
+    existing_library_path = env.get("LD_LIBRARY_PATH")
+    env["LD_LIBRARY_PATH"] = (
+        f"{binary_root}:{existing_library_path}" if existing_library_path else str(binary_root)
+    )
+
+    command = [
+        str(docbuilder),
+        # Document Builder's native parser disables this flag only when the
+        # value begins with "0"; the seemingly equivalent string "false"
+        # enables it and would replace our deterministic cache with whatever
+        # fonts happen to be visible on the host.
+        "--check-fonts=0",
+        "--fonts-system=false",
+        f"--all-fonts-path={binary_root / 'AllFonts.js'}",
+        f"--argument={compact_argument}",
+        str(script),
+    ]
+
+    returncode, stdout, stderr, stdout_bytes, stderr_bytes, timed_out = _run_bounded(
+        command,
+        cwd=binary_root,
+        env=env,
+        timeout_seconds=args.timeout,
+        diagnostic_limit=args.max_diagnostic_bytes,
+    )
+
+    artifacts: list[dict[str, object]] = []
+    artifact_errors: list[str] = []
+    for output in outputs:
+        if not output.exists() and not output.is_symlink():
+            continue
+        try:
+            artifacts.append(_artifact(output))
+        except (ContractError, OSError) as exc:
+            artifact_errors.append(str(exc))
+
+    status = "succeeded"
+    normalized_returncode = returncode
+    if timed_out:
+        status = "timed_out"
+    elif returncode < 0:
+        status = "terminated"
+        normalized_returncode = EXIT_SIGNAL
+    elif returncode != 0 or artifact_errors or len(artifacts) != len(outputs):
+        status = "failed"
+        normalized_returncode = EXIT_ENGINE
+
+    manifest = {
+        "schema": "ai.neoharness.office.runtime-result.v1",
+        "runtime_version": _version(),
+        "status": status,
+        "exit_code": normalized_returncode,
+        "engine_exit_code": returncode,
+        "duration_ms": round((time.monotonic() - started) * 1000),
+        "command": "docbuilder",
+        "inputs": [str(item) for item in inputs],
+        "expected_outputs": [str(item) for item in outputs],
+        "artifacts": artifacts,
+        "artifact_errors": artifact_errors,
+        "diagnostics": {
+            "stdout": stdout.decode("utf-8", errors="replace"),
+            "stderr": stderr.decode("utf-8", errors="replace"),
+            "stdout_bytes": stdout_bytes,
+            "stderr_bytes": stderr_bytes,
+            "stdout_truncated": stdout_bytes > len(stdout),
+            "stderr_truncated": stderr_bytes > len(stderr),
+        },
+    }
+    try:
+        _write_json_atomic(manifest_path, manifest)
+    except OSError as exc:
+        print(f"nh-office: could not write manifest: {exc}", file=sys.stderr)
+        return EXIT_ENGINE
+
+    if stdout:
+        sys.stdout.buffer.write(stdout)
+        if not stdout.endswith(b"\n"):
+            sys.stdout.buffer.write(b"\n")
+    if stderr:
+        sys.stderr.buffer.write(stderr)
+        if not stderr.endswith(b"\n"):
+            sys.stderr.buffer.write(b"\n")
+    for error in artifact_errors:
+        print(f"nh-office: {error}", file=sys.stderr)
+
+    print(json.dumps({"manifest": str(manifest_path), "status": status}, sort_keys=True))
+    return normalized_returncode
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="nh-office",
+        description="Run source-built neoHarness Office operations in an exact workspace.",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    run = subparsers.add_parser("run", help="execute a Document Builder JavaScript program")
+    run.add_argument("script", help="absolute script path beneath /workspace/work")
+    run.add_argument(
+        "--input",
+        action="append",
+        default=[],
+        help="exact regular input file beneath /workspace/input; repeatable",
+    )
+    run.add_argument(
+        "--output",
+        action="append",
+        default=[],
+        help="expected regular output file beneath /workspace/output; repeatable",
+    )
+    run.add_argument(
+        "--argument",
+        help="optional UTF-8 JSON file beneath /workspace/work",
+    )
+    run.add_argument(
+        "--manifest",
+        default=str(DEFAULT_MANIFEST),
+        help=f"result manifest path beneath /workspace/output (default: {DEFAULT_MANIFEST})",
+    )
+    run.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=f"wall timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS:g})",
+    )
+    run.add_argument(
+        "--max-diagnostic-bytes",
+        type=int,
+        default=DEFAULT_DIAGNOSTIC_LIMIT,
+        help=f"maximum captured bytes per stream (default: {DEFAULT_DIAGNOSTIC_LIMIT})",
+    )
+    run.set_defaults(handler=_run)
+    return parser
+
+
+def main() -> int:
+    parser = _parser()
+    args = parser.parse_args()
+    if getattr(args, "timeout", 1) <= 0:
+        parser.error("--timeout must be greater than zero")
+    if getattr(args, "max_diagnostic_bytes", 1) < 0:
+        parser.error("--max-diagnostic-bytes cannot be negative")
+    return int(args.handler(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

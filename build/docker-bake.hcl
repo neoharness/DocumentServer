@@ -30,7 +30,19 @@ variable "TAG" {
 }
 
 variable "PRODUCT_VERSION" {
-  default = "9.3.1"
+  default = "9.3.3"
+}
+
+variable "NHO_RUNTIME_VERSION" {
+  default = "9.3.3-nh1"
+}
+
+variable "NHO_SOURCE_REVISION" {
+  default = "unknown"
+}
+
+variable "SOURCE_DATE_EPOCH" {
+  default = "0"
 }
 
 variable "BUILD_NUMBER" {
@@ -79,6 +91,10 @@ group "cluster" {
 
 group "develop" {
   targets = ["develop"]
+}
+
+group "headless-runtime" {
+  targets = ["headless-runtime-artifacts", "headless-runtime-oci"]
 }
 
 # ──────────────────────────────────────────────
@@ -216,6 +232,37 @@ target "packages" {
   output = ["type=local,dest=./deploy/packages"]
 
   cache-from = ["type=local,src=/tmp/${REGISTRY}/packages"]  # reuses builder cache
+}
+
+# ──────────────────────────────────────────────
+# HEADLESS RUNTIME
+# ──────────────────────────────────────────────
+
+target "_headless-runtime-common" {
+  inherits   = ["_common"]
+  context    = ".."
+  dockerfile = "./build/.docker/headless-runtime.bake.Dockerfile"
+  args = {
+    NHO_RUNTIME_VERSION = "${NHO_RUNTIME_VERSION}"
+    NHO_SOURCE_REVISION = "${NHO_SOURCE_REVISION}"
+    SOURCE_DATE_EPOCH   = "${SOURCE_DATE_EPOCH}"
+  }
+  contexts = {
+    core  = "target:core"
+    sdkjs = "target:sdkjs"
+  }
+}
+
+target "headless-runtime-artifacts" {
+  inherits = ["_headless-runtime-common"]
+  target   = "headless-runtime-artifacts"
+  output   = ["type=local,dest=./deploy/headless-runtime"]
+}
+
+target "headless-runtime-oci" {
+  inherits = ["_headless-runtime-common"]
+  target   = "headless-runtime-oci"
+  tags     = ["${REGISTRY}/office-runtime:${TAG}"]
 }
 
 # ──────────────────────────────────────────────

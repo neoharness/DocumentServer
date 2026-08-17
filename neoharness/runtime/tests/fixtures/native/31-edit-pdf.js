@@ -1,0 +1,10 @@
+var inputPath = Argument["input"];
+var outputPath = Argument["output"];
+builder.OpenFile("jsValue(inputPath)");
+var oDocument = Api.GetDocument();
+var oPage = oDocument.GetElement(0);
+var oParagraph = Api.CreateParagraph();
+oParagraph.AddText("NHO_RUNTIME_PDF_EDITED");
+oPage.Push(oParagraph);
+builder.SaveFile("pdf", "jsValue(outputPath)");
+builder.CloseFile();
