@@ -57,6 +57,10 @@ variable "BUILD_ROOT" {
   default = "/package"
 }
 
+variable "WEB_APPS_THEME" {
+  default = "whitelabel"
+}
+
 variable "PACKAGE_BASE" {
   default = "docsrv-build"
 }
@@ -168,6 +172,9 @@ target "web-apps" {
   context    = ".."
   dockerfile = "./web-apps/.docker/web-apps.bake.Dockerfile"
   tags       = ["${REGISTRY}/web-apps:${TAG}"]
+  args = {
+    THEME = "${WEB_APPS_THEME}"
+  }
   cache-from = ["type=local,src=/tmp/${REGISTRY}/web-apps"]
   cache-to   = ["type=local,dest=/tmp/${REGISTRY}/web-apps,mode=max"]
 }
