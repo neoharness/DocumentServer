@@ -137,6 +137,13 @@ def configured_submodule_url(repo: Path, configured_path: str) -> str:
     raise ReleaseError(f"submodule path is not configured: {configured_path}")
 
 
+def repository_origin_url(repo: Path) -> str | None:
+    """Return repository identity for the top-level source coordinate."""
+
+    value = git(repo, "config", "--get", "remote.origin.url", check=False)
+    return value or None
+
+
 def collect_submodules(root: Path) -> list[dict[str, Any]]:
     collected: list[dict[str, Any]] = []
 
@@ -354,7 +361,7 @@ def main() -> int:
             "schema": "ai.neoharness.office.source-release.v1",
             "version": arguments.version,
             "source_commit": head,
-            "source_remote": remote_url(root),
+            "source_remote": repository_origin_url(root),
             "source_date_epoch": epoch,
             "upstream_baseline": SUPERPROJECT_BASELINE,
             "submodules": submodules,
