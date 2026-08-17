@@ -34,6 +34,15 @@ The final writer is deterministic; it is not a model preference.
    - `nh-document ooxml` when its bounded operation expresses the entire
      requested change and its package comparison proves the unrelated parts
      were preserved.
+
+For existing workbooks, prefer `nh-document ooxml xlsx-cells` when the entire
+request is an exact set of cell value or formula changes, and
+`nh-document ooxml xlsx-format` for bounded cell styling, row/column sizing,
+panes, gridlines, tab color, or sheet visibility. Use `nh-office run` when the
+outcome requires native editor semantics such as new charts, drawings,
+validation, tables, or workbook structure. Do not learn this boundary by
+round-tripping a fragile workbook first: inspect the source and choose the
+narrowest operation that fully expresses the requested outcome.
 3. Use the domain finalizer for bounded non-Office work: qpdf for PDF page and
    structural operations, OCRmyPDF/Tesseract for searchable PDF creation, and
    the image pipeline for image transformations.

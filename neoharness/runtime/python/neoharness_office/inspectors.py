@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-from collections import deque
 import hashlib
-import json
-import os
-from pathlib import Path, PurePosixPath
 import posixpath
 import re
-from typing import Iterable
 import xml.etree.ElementTree as ET
 import zipfile
+from collections import Counter, deque
+from collections.abc import Iterable
+from pathlib import Path, PurePosixPath
 
 from .images import image_info
 from .paths import file_fact
 from .process import run_utility
-
 
 MAX_XML_BYTES = 128 * 1024 * 1024
 MAX_ZIP_ENTRIES = 100_000
@@ -22,6 +19,7 @@ MAX_ZIP_UNCOMPRESSED = 8 * 1024 * 1024 * 1024
 MAX_TEXT_SAMPLE = 8_000
 MAX_CELL_SAMPLES = 240
 MAX_LIST_ITEMS = 500
+MAX_COMPARISON_CHANGES = 2_000
 
 NS = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
@@ -87,7 +85,9 @@ def _bounded_text(value: str, limit: int = MAX_TEXT_SAMPLE) -> str:
     return normalized[:limit] + "…"
 
 
-def _read_part(archive: zipfile.ZipFile, name: str, *, limit: int = MAX_XML_BYTES) -> bytes:
+def _read_part(
+    archive: zipfile.ZipFile, name: str, *, limit: int = MAX_XML_BYTES
+) -> bytes:
     try:
         info = archive.getinfo(name)
     except KeyError as exc:
@@ -104,7 +104,9 @@ def _xml(archive: zipfile.ZipFile, name: str) -> ET.Element:
     try:
         return ET.fromstring(_read_part(archive, name))
     except ET.ParseError as exc:
-        raise InspectionError(f"OOXML part is not well-formed XML: {name}: {exc}") from exc
+        raise InspectionError(
+            f"OOXML part is not well-formed XML: {name}: {exc}"
+        ) from exc
 
 
 def _archive_facts(archive: zipfile.ZipFile) -> dict[str, object]:
@@ -124,7 +126,8 @@ def _archive_facts(archive: zipfile.ZipFile) -> dict[str, object]:
     embedded = [
         name
         for name in names
-        if "/embeddings/" in f"/{name.lower()}" or name.lower().endswith("oleobject.bin")
+        if "/embeddings/" in f"/{name.lower()}"
+        or name.lower().endswith("oleobject.bin")
     ]
     return {
         "entries": len(infos),
@@ -186,7 +189,11 @@ def _relationship_map(
     for relationship in _xml(archive, rels_name):
         identifier = relationship.attrib.get("Id")
         target = relationship.attrib.get("Target")
-        if identifier and target and relationship.attrib.get("TargetMode") != "External":
+        if (
+            identifier
+            and target
+            and relationship.attrib.get("TargetMode") != "External"
+        ):
             result[identifier] = _resolve_relationship(source, target)
     return result
 
@@ -287,7 +294,9 @@ def _shared_strings(archive: zipfile.ZipFile) -> list[str]:
     root = _xml(archive, name)
     values: list[str] = []
     for item in root.findall("s:si", NS):
-        text = "".join(node.text or "" for node in item.iter() if _local(node.tag) == "t")
+        text = "".join(
+            node.text or "" for node in item.iter() if _local(node.tag) == "t"
+        )
         values.append(text)
         if len(values) >= 500_000:
             break
@@ -348,10 +357,7 @@ def _inspect_worksheet(
                     "style": cell.attrib.get("s"),
                 }
             )
-    merges = [
-        node.attrib.get("ref", "")
-        for node in root.findall(".//s:mergeCell", NS)
-    ]
+    merges = [node.attrib.get("ref", "") for node in root.findall(".//s:mergeCell", NS)]
     dimension = root.find("s:dimension", NS)
     row_indices = [row for row, _ in cells]
     column_indices = [column for _, column in cells]
@@ -359,7 +365,9 @@ def _inspect_worksheet(
         "name": name,
         "state": state,
         "part": path,
-        "declared_dimension": dimension.attrib.get("ref") if dimension is not None else None,
+        "declared_dimension": dimension.attrib.get("ref")
+        if dimension is not None
+        else None,
         "occupied_cells": len(cells),
         "styled_blank_cells": styled_blank_count,
         "formula_cells": formula_count,
@@ -539,7 +547,9 @@ def _inspect_ooxml(path: Path, extension: str) -> dict[str, object]:
     try:
         archive = zipfile.ZipFile(path)
     except (OSError, zipfile.BadZipFile) as exc:
-        raise InspectionError(f"file is not a valid OOXML ZIP package: {path.name}") from exc
+        raise InspectionError(
+            f"file is not a valid OOXML ZIP package: {path.name}"
+        ) from exc
     with archive:
         package = _archive_facts(archive)
         relationships = _relationship_facts(archive)
@@ -581,7 +591,9 @@ def _inspect_pdf(path: Path) -> dict[str, object]:
         check=False,
     )
     extracted = str(text_result["stdout"])
-    image_result = run_utility(["pdfimages", "-list", str(path)], timeout=30, check=False)
+    image_result = run_utility(
+        ["pdfimages", "-list", str(path)], timeout=30, check=False
+    )
     image_lines = [
         line
         for line in str(image_result["stdout"]).splitlines()
@@ -653,16 +665,240 @@ def _part_hashes(path: Path) -> dict[str, str]:
         return result
 
 
+def _xlsx_comparison_facts(archive: zipfile.ZipFile) -> dict[str, object]:
+    """Return complete workbook authority facts used by revision validation.
+
+    Samples are not sufficient at the publication boundary: a workbook can
+    contain formulas far outside the inspector's visible-cell sample.  These
+    maps intentionally walk every declared worksheet formula while retaining
+    only formula text/attributes rather than cell values or customer content.
+    """
+
+    workbook = _xml(archive, "xl/workbook.xml")
+    relations = _relationship_map(
+        archive, "xl/workbook.xml", "xl/_rels/workbook.xml.rels"
+    )
+    formulas: dict[tuple[str, str], dict[str, object]] = {}
+    sheet_states: dict[str, str] = {}
+    for sheet in workbook.findall(".//s:sheet", NS):
+        name = sheet.attrib.get("name", "")
+        sheet_states[name] = sheet.attrib.get("state", "visible")
+        identifier = sheet.attrib.get(f"{{{NS['r']}}}id", "")
+        path = relations.get(identifier)
+        if not path or path not in archive.namelist():
+            continue
+        root = _xml(archive, path)
+        for cell in root.findall(".//s:c", NS):
+            formula = cell.find("s:f", NS)
+            reference = cell.attrib.get("r")
+            if formula is None or not reference:
+                continue
+            formulas[(name, reference.upper())] = {
+                "text": formula.text or "",
+                "attributes": dict(sorted(formula.attrib.items())),
+            }
+    sheet_order = [
+        sheet.attrib.get("name", "") for sheet in workbook.findall(".//s:sheet", NS)
+    ]
+    defined_names: dict[tuple[str, str | None], str] = {}
+    for node in workbook.findall(".//s:definedName", NS):
+        raw_scope = node.attrib.get("localSheetId")
+        scope: str | None = None
+        if raw_scope is not None:
+            try:
+                scope = sheet_order[int(raw_scope)]
+            except (ValueError, IndexError):
+                scope = f"#localSheetId:{raw_scope}"
+        defined_names[(node.attrib.get("name", ""), scope)] = node.text or ""
+    return {
+        "formulas": formulas,
+        "sheet_states": sheet_states,
+        "defined_names": defined_names,
+    }
+
+
+def _bounded_changes(values: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "count": len(values),
+        "changes": values[:MAX_COMPARISON_CHANGES],
+        "truncated": len(values) > MAX_COMPARISON_CHANGES,
+    }
+
+
+def _compare_xlsx_facts(
+    before: zipfile.ZipFile, after: zipfile.ZipFile
+) -> dict[str, object]:
+    before_facts = _xlsx_comparison_facts(before)
+    after_facts = _xlsx_comparison_facts(after)
+
+    before_formulas = before_facts["formulas"]
+    after_formulas = after_facts["formulas"]
+    assert isinstance(before_formulas, dict)
+    assert isinstance(after_formulas, dict)
+    formula_changes = [
+        {
+            "sheet": sheet,
+            "cell": cell,
+            "before": before_formulas.get((sheet, cell)),
+            "after": after_formulas.get((sheet, cell)),
+        }
+        for sheet, cell in sorted(set(before_formulas) | set(after_formulas))
+        if before_formulas.get((sheet, cell)) != after_formulas.get((sheet, cell))
+    ]
+
+    before_states = before_facts["sheet_states"]
+    after_states = after_facts["sheet_states"]
+    assert isinstance(before_states, dict)
+    assert isinstance(after_states, dict)
+    sheet_state_changes = [
+        {
+            "sheet": name,
+            "before": before_states.get(name),
+            "after": after_states.get(name),
+        }
+        for name in sorted(set(before_states) | set(after_states))
+        if before_states.get(name) != after_states.get(name)
+    ]
+
+    before_names = before_facts["defined_names"]
+    after_names = after_facts["defined_names"]
+    assert isinstance(before_names, dict)
+    assert isinstance(after_names, dict)
+    defined_name_changes = [
+        {
+            "name": name,
+            "scope_sheet": scope,
+            "before": before_names.get((name, scope)),
+            "after": after_names.get((name, scope)),
+        }
+        for name, scope in sorted(
+            set(before_names) | set(after_names),
+            key=lambda item: (item[0], item[1] or ""),
+        )
+        if before_names.get((name, scope)) != after_names.get((name, scope))
+    ]
+    return {
+        "formulas": _bounded_changes(formula_changes),
+        "sheet_states": _bounded_changes(sheet_state_changes),
+        "defined_names": _bounded_changes(defined_name_changes),
+    }
+
+
+def _sensitive_part_category(name: str) -> str | None:
+    lowered = name.casefold()
+    categories = (
+        ("macro", "vbaproject.bin"),
+        ("media", "/media/"),
+        ("chart", "/charts/"),
+        ("drawing", "/drawings/"),
+        ("table", "/tables/"),
+        ("pivot", "pivot"),
+        ("external_link", "/externallinks/"),
+        ("printer_settings", "/printersettings/"),
+        ("embedded_object", "/embeddings/"),
+        ("activex", "/activex/"),
+        ("control_property", "/ctrlprops/"),
+    )
+    for category, marker in categories:
+        if marker in lowered:
+            return category
+    return None
+
+
+def _sensitive_part_changes(
+    before: dict[str, str], after: dict[str, str]
+) -> list[dict[str, object]]:
+    changes: list[dict[str, object]] = []
+    for name in sorted(set(before) | set(after)):
+        category = _sensitive_part_category(name)
+        if category is None or before.get(name) == after.get(name):
+            continue
+        change = "changed"
+        if name not in before:
+            change = "added"
+        elif name not in after:
+            change = "removed"
+        changes.append(
+            {
+                "part": name,
+                "category": category,
+                "change": change,
+                "before_sha256": before.get(name),
+                "after_sha256": after.get(name),
+            }
+        )
+    return changes
+
+
+def _external_relationships(
+    archive: zipfile.ZipFile,
+) -> Counter[tuple[str, str, str, str]]:
+    relationships: Counter[tuple[str, str, str, str]] = Counter()
+    for info in archive.infolist():
+        if not info.filename.endswith(".rels"):
+            continue
+        try:
+            root = _xml(archive, info.filename)
+        except InspectionError:
+            continue
+        for relationship in root:
+            if relationship.attrib.get("TargetMode") != "External":
+                continue
+            relationships[
+                (
+                    info.filename,
+                    relationship.attrib.get("Id", ""),
+                    relationship.attrib.get("Type", ""),
+                    relationship.attrib.get("Target", ""),
+                )
+            ] += 1
+    return relationships
+
+
+def _compare_external_relationships(
+    before: zipfile.ZipFile, after: zipfile.ZipFile
+) -> dict[str, object]:
+    before_values = _external_relationships(before)
+    after_values = _external_relationships(after)
+
+    def expand(values: Counter[tuple[str, str, str, str]]) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for (part, identifier, kind, target), count in sorted(values.items()):
+            rows.append(
+                {
+                    "part": part,
+                    "id": identifier,
+                    "type": kind,
+                    "target": target,
+                    "count": count,
+                }
+            )
+        return rows
+
+    removed = expand(before_values - after_values)
+    added = expand(after_values - before_values)
+    combined = removed + added
+    return {
+        "count": len(removed) + len(added),
+        "removed": removed[:MAX_COMPARISON_CHANGES],
+        "added": added[:MAX_COMPARISON_CHANGES],
+        "truncated": len(combined) > MAX_COMPARISON_CHANGES,
+    }
+
+
 def compare_files(before: Path, after: Path) -> dict[str, object]:
     before_fact = file_fact(before, mime_type=_file_mime(before))
     after_fact = file_fact(after, mime_type=_file_mime(after))
     result: dict[str, object] = {
-        "schema": "ai.neoharness.office.document-comparison.v1",
+        "schema": "ai.neoharness.office.document-comparison.v2",
         "before": before_fact,
         "after": after_fact,
         "byte_identical": before_fact["sha256"] == after_fact["sha256"],
     }
-    if before.suffix.lower() in OOXML_EXTENSIONS and after.suffix.lower() in OOXML_EXTENSIONS:
+    if (
+        before.suffix.lower() in OOXML_EXTENSIONS
+        and after.suffix.lower() in OOXML_EXTENSIONS
+    ):
         before_parts = _part_hashes(before)
         after_parts = _part_hashes(after)
         before_names = set(before_parts)
@@ -677,6 +913,7 @@ def compare_files(before: Path, after: Path) -> dict[str, object]:
             for name in before_names | after_names
             if name.lower().endswith("vbaproject.bin")
         )
+        sensitive_changes = _sensitive_part_changes(before_parts, after_parts)
         result["package"] = {
             "added_parts": sorted(after_names - before_names),
             "removed_parts": sorted(before_names - after_names),
@@ -691,5 +928,26 @@ def compare_files(before: Path, after: Path) -> dict[str, object]:
                 }
                 for name in macros
             ],
+            "sensitive_part_changes": sensitive_changes[:MAX_COMPARISON_CHANGES],
+            "sensitive_part_change_count": len(sensitive_changes),
+            "sensitive_part_changes_truncated": (
+                len(sensitive_changes) > MAX_COMPARISON_CHANGES
+            ),
         }
+        with (
+            zipfile.ZipFile(before) as before_archive,
+            zipfile.ZipFile(after) as after_archive,
+        ):
+            result["external_relationships"] = _compare_external_relationships(
+                before_archive, after_archive
+            )
+            if before.suffix.lower() in {
+                ".xlsx",
+                ".xlsm",
+                ".xltx",
+                ".xltm",
+            } and after.suffix.lower() in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
+                result["spreadsheet"] = _compare_xlsx_facts(
+                    before_archive, after_archive
+                )
     return result

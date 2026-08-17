@@ -3,9 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import sys
 import tempfile
+from pathlib import Path
 from typing import Any
 
 from .images import (
@@ -20,6 +20,8 @@ from .images import (
 from .inspectors import compare_files, inspect_file
 from .ocr import make_searchable_pdf
 from .ooxml import (
+    format_xlsx,
+    load_format_plan,
     load_update_plan,
     replace_text,
     replace_text_with_field,
@@ -38,7 +40,6 @@ from .quality import (
     qualify_artifact,
 )
 from .rendering import before_after, render_page, render_pdf
-
 
 EXIT_DATA = 65
 EXIT_TOOL = 70
@@ -70,10 +71,14 @@ def _emit(value: object, output: str | None) -> None:
 def _inspect(args: argparse.Namespace) -> int:
     paths = [exact_read_file(item) for item in args.files]
     inspections = [inspect_file(path) for path in paths]
-    value: object = inspections[0] if len(inspections) == 1 else {
-        "schema": "ai.neoharness.office.workspace-inspection.v1",
-        "files": inspections,
-    }
+    value: object = (
+        inspections[0]
+        if len(inspections) == 1
+        else {
+            "schema": "ai.neoharness.office.workspace-inspection.v1",
+            "files": inspections,
+        }
+    )
     _emit(value, args.output)
     return 0
 
@@ -121,9 +126,7 @@ def _image(args: argparse.Namespace) -> int:
         ),
         "orient": lambda: auto_orient(input_path, output_path),
         "convert": lambda: convert(input_path, output_path),
-        "flatten": lambda: flatten(
-            input_path, output_path, background=args.background
-        ),
+        "flatten": lambda: flatten(input_path, output_path, background=args.background),
     }
     _emit(
         {
@@ -137,9 +140,7 @@ def _image(args: argparse.Namespace) -> int:
 
 def _render(args: argparse.Namespace) -> int:
     if args.render_action == "pdf":
-        result = render_pdf(
-            exact_read_file(args.input), exact_write_file(args.output)
-        )
+        result = render_pdf(exact_read_file(args.input), exact_write_file(args.output))
     elif args.render_action == "page":
         result = render_page(
             exact_read_file(args.input),
@@ -183,9 +184,7 @@ def _pdf(args: argparse.Namespace) -> int:
     if args.pdf_action == "merge":
         result = merge_pdf([exact_read_file(item) for item in args.inputs], output)
     elif args.pdf_action == "extract":
-        result = extract_pdf(
-            exact_read_file(args.input), output, pages=args.pages
-        )
+        result = extract_pdf(exact_read_file(args.input), output, pages=args.pages)
     elif args.pdf_action == "rotate":
         result = rotate_pdf(
             exact_read_file(args.input),
@@ -233,9 +232,12 @@ def _ooxml(args: argparse.Namespace) -> int:
             value=args.value,
             expected_count=args.expected_count,
         )
-    else:
+    elif args.ooxml_action == "xlsx-cells":
         plan = load_update_plan(exact_read_file(args.plan))
         result = update_xlsx_cells(source, output, updates=plan)
+    else:
+        plan = load_format_plan(exact_read_file(args.plan))
+        result = format_xlsx(source, output, plan=plan)
     _emit(
         {"schema": "ai.neoharness.office.surgical-operation.v1", "result": result},
         args.json_output,
@@ -450,9 +452,31 @@ def _parser() -> argparse.ArgumentParser:
     cells_parser = ooxml_actions.add_parser("xlsx-cells")
     cells_parser.add_argument("input")
     cells_parser.add_argument("output")
-    cells_parser.add_argument("--plan", required=True)
+    cells_parser.add_argument(
+        "--plan",
+        required=True,
+        help=(
+            "UTF-8 JSON mapping worksheet names to A1 cell updates, for "
+            'example {"Executive":{"B2":41,"C7":{"formula":'
+            '"=B2+1","cached":42},"D8":{"value":"=literal"}}}'
+        ),
+    )
     cells_parser.add_argument("--json-output")
     cells_parser.set_defaults(handler=_ooxml)
+
+    format_parser = ooxml_actions.add_parser("xlsx-format")
+    format_parser.add_argument("input")
+    format_parser.add_argument("output")
+    format_parser.add_argument(
+        "--plan",
+        required=True,
+        help=(
+            "UTF-8 JSON mapping worksheet names to bounded ranges, columns, "
+            "rows, panes, gridlines, tab colors, and visibility changes"
+        ),
+    )
+    format_parser.add_argument("--json-output")
+    format_parser.set_defaults(handler=_ooxml)
 
     quality_parser = subparsers.add_parser(
         "quality",

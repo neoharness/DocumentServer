@@ -76,11 +76,45 @@ nh-document ooxml word-field /workspace/input/source.docx \
   --instruction 'DATE \\@ "MMMM d, yyyy"' --expected-count 1
 
 # Apply exact, disconnected cell changes to a free-form workbook. The JSON
-# plan maps sheet names to A1 coordinates; formulas request full recalculation.
+# plan maps sheet names to A1 coordinates. Every successful change requests a
+# full recalculation on open so dependent cached values cannot remain stale.
 nh-document ooxml xlsx-cells /workspace/input/source.xlsm \
   /workspace/output/candidate.xlsm \
   --plan /workspace/work/cell-plan.json
 ```
+
+The cell plan shape is explicit:
+
+```json
+{
+  "Executive": {
+    "B2": 41,
+    "C7": {"formula": "=B2+1", "cached": 42},
+    "D8": {"value": "=literal text"},
+    "F9": {"value": "New text", "style_from": "F8"},
+    "G10": {"clear": true}
+  }
+}
+```
+
+A scalar string beginning with `=` is rejected as ambiguous. Use the explicit
+`formula` member for a formula, or the explicit `value` member for literal text
+that begins with an equals sign.
+
+For presentation-only workbook changes without an editor-wide round trip, use
+the surgical formatter:
+
+```bash
+nh-document ooxml xlsx-format /workspace/input/source.xlsx \
+  /workspace/output/formatted.xlsx \
+  --plan /workspace/work/format-plan.json
+```
+
+The format plan maps worksheet names to bounded `ranges`, `columns`, `rows`,
+`freeze_panes`, `show_gridlines`, `tab_color`, and `state`. Range rules support
+font, fill, border, alignment, number format, exact style copying, and an
+explicit `apply_to_blank_cells` switch. Formatting never changes a cell value
+or formula and preserves unrelated package parts byte-for-byte.
 
 Surgical helpers change only the targeted XML parts, report the exact package
 part delta, and verify that macro payloads remain byte-identical. They never
