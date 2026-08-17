@@ -112,6 +112,36 @@ make vagrant-ssh VM=ubuntu2404
 make vagrant-destroy
 ```
 
+## Building the neoHarness headless runtime
+
+The `headless-runtime` group builds the source-native document engine without
+the viewer, collaboration server, database, broker, cache, or proxy stack:
+
+```sh
+cd DocumentServer/build
+docker buildx bake headless-runtime
+```
+
+It produces the runtime `.deb`, inspection/recovery `tar.zst`, and headless OCI
+image. The supported launchers, quality-finalizer policy, and installed
+capabilities are documented in `neoharness/runtime/README.md`.
+
+## Building a complete neoHarness release
+
+The release entry point rejects dirty or mis-pinned recursive source trees and
+creates the viewer/runtime images, packages, corresponding source, patch
+series, notices, SBOMs, checksums, provenance, and mechanical smoke evidence as
+one immutable directory:
+
+```sh
+./neoharness/release/install-syft.sh /srv/neoharness-office/tools/bin
+export NHO_BUILD_CACHE_ROOT=/srv/neoharness-office/cache/buildx
+./neoharness/release/build-release.sh /new/output/neoharness-office-9.3.3-nh1
+```
+
+See `neoharness/release/REPRODUCE.md` for exact prerequisites, installation,
+and independent verification commands.
+
 ## Tagging a release
 
 The `scripts/tag_release.sh` script creates semver pre-release tags

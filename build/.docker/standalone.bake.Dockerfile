@@ -12,6 +12,9 @@ FROM ubuntu:24.04 AS finalubuntu
 ARG PRODUCT_VERSION
 ARG BUILD_NUMBER
 ARG BUILD_ROOT=/package
+ARG NHO_RELEASE_VERSION=9.3.3-nh1
+ARG NHO_SOURCE_REVISION=unknown
+ARG SOURCE_DATE_EPOCH=0
 
 ARG COMPANY_NAME_LOW
 ARG PRODUCT_NAME_LOW
@@ -85,5 +88,13 @@ RUN mkdir -p /home/ds && chown ds:ds /home/ds
 #    chown -R ds:ds /var/www/${COMPANY_NAME_LOW} /var/lib/${COMPANY_NAME_LOW} /var/log/${COMPANY_NAME_LOW}
 
 RUN /usr/bin/documentserver-flush-cache.sh -r false
+
+LABEL org.opencontainers.image.title="neoHarness Office DocumentServer" \
+      org.opencontainers.image.version="${NHO_RELEASE_VERSION}" \
+      org.opencontainers.image.revision="${NHO_SOURCE_REVISION}" \
+      org.opencontainers.image.source="https://github.com/neoharness/DocumentServer" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      ai.neoharness.office.source-date-epoch="${SOURCE_DATE_EPOCH}" \
+      ai.neoharness.office.runtime="viewer"
 
 ENTRYPOINT ["/entrypoint.sh"]

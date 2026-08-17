@@ -64,6 +64,10 @@ COPY neoharness/runtime/CAPABILITIES.md \
     /opt/neoharness-office/share/runtime/CAPABILITIES.md
 COPY neoharness/runtime/quality-policy.v1.json \
     /opt/neoharness-office/share/runtime/quality-policy.v1.json
+COPY neoharness/release/THIRD_PARTY_NOTICES.md \
+    /opt/neoharness-office/share/licenses/THIRD_PARTY_NOTICES.md
+COPY neoharness/release/collect-runtime-licenses.py \
+    /usr/local/libexec/collect-runtime-licenses
 COPY sdkjs/word/apiBuilder.js \
     /opt/neoharness-office/share/api-reference/word-apiBuilder.js
 COPY sdkjs/cell/apiBuilder.js \
@@ -75,6 +79,9 @@ COPY sdkjs/pdf/apiBuilder.js \
 COPY LICENSE /opt/neoharness-office/share/licenses/AGPL-3.0.txt
 COPY core/LICENSE.txt /opt/neoharness-office/share/licenses/core-LICENSE.txt
 COPY sdkjs/LICENSE.txt /opt/neoharness-office/share/licenses/sdkjs-LICENSE.txt
+RUN --mount=type=bind,source=.,target=/source,ro \
+    python3 /usr/local/libexec/collect-runtime-licenses \
+        /source /opt/neoharness-office/share/licenses
 
 # Keep release identity below dependency installation and static runtime assets
 # so a new source revision does not invalidate those expensive layers.
@@ -223,6 +230,7 @@ RUN ln -s /opt/neoharness-office/bin/nh-office /usr/bin/nh-office \
 LABEL org.opencontainers.image.title="neoHarness Office headless runtime" \
       org.opencontainers.image.version="${NHO_RUNTIME_VERSION}" \
       org.opencontainers.image.revision="${NHO_SOURCE_REVISION}" \
+      org.opencontainers.image.source="https://github.com/neoharness/DocumentServer" \
       org.opencontainers.image.licenses="AGPL-3.0-only" \
       ai.neoharness.office.runtime="headless"
 

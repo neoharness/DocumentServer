@@ -1,0 +1,2 @@
+# Preserve verbatim imported legal text, including upstream whitespace.
+neoharness/release/font-licenses/* -whitespace
