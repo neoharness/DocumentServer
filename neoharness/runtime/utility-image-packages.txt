@@ -1,0 +1,35 @@
+# Installed into the utility VM template at the later pool-integration boundary.
+# The headless runtime package directly depends on the subset required by its
+# installed helpers; this broader set keeps raw selected-agent code available.
+ffmpeg
+ghostscript
+imagemagick
+img2pdf
+inkscape
+jpegoptim
+libheif-examples
+libimage-exiftool-perl
+libraw-bin
+librsvg2-bin
+libvips-tools
+mupdf-tools
+ocrmypdf
+optipng
+pandoc
+pngquant
+poppler-utils
+potrace
+python3-opencv
+python3-docx
+python3-lxml
+python3-openpyxl
+python3-pikepdf
+python3-pil
+python3-skimage
+qpdf
+tesseract-ocr
+tesseract-ocr-eng
+unpaper
+unzip
+webp
+zip

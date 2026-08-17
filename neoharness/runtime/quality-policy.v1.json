@@ -1,0 +1,64 @@
+{
+  "schema": "ai.neoharness.office.quality-policy.v1",
+  "version": "neoharness-office-quality.v1",
+  "principle": "Execution utilities remain available, but only evidenced finalizers may qualify bytes for publication.",
+  "finalizers": {
+    "native_office": {
+      "description": "neoHarness Office native Document Builder wrote the final Office or PDF bytes"
+    },
+    "surgical_ooxml": {
+      "description": "The preservation-aware OOXML editor changed bounded package parts and compared the result"
+    },
+    "office_render": {
+      "description": "neoHarness Office rendered an Office artifact to a derived PDF or page image"
+    },
+    "pdf_render": {
+      "description": "The bounded render pipeline converted an image or page source into a validated PDF"
+    },
+    "pdf_page": {
+      "description": "qpdf performed a bounded PDF page, rotation, merge, or structural operation"
+    },
+    "pdf_ocr": {
+      "description": "OCRmyPDF or Tesseract produced a validated searchable PDF"
+    },
+    "image_transform": {
+      "description": "The image pipeline performed a bounded image-domain transformation"
+    },
+    "preview_only": {
+      "description": "The artifact is diagnostic or visual evidence and is not a canonical document revision"
+    },
+    "unqualified": {
+      "description": "No approved finalizer evidence exists"
+    }
+  },
+  "rules": {
+    "create": {
+      "ooxml": ["native_office"],
+      "pdf": ["native_office", "office_render", "pdf_render", "pdf_page", "pdf_ocr"],
+      "image": ["image_transform"]
+    },
+    "revise": {
+      "ooxml": ["native_office", "surgical_ooxml"],
+      "pdf": ["native_office", "pdf_page", "pdf_ocr"],
+      "image": ["image_transform"]
+    },
+    "derived": {
+      "pdf": ["native_office", "office_render", "pdf_render", "pdf_page", "pdf_ocr"],
+      "image": ["office_render", "image_transform", "preview_only"]
+    }
+  },
+  "non_qualifying_final_serializers": [
+    "libreoffice",
+    "pandoc",
+    "python-docx",
+    "openpyxl",
+    "python-pptx",
+    "generic_xml",
+    "unknown"
+  ],
+  "notes": [
+    "Non-qualifying tools may be used for inspection, extraction, transformation planning, and intermediate data.",
+    "Reopening bytes produced by a non-qualifying serializer does not prove that discarded structure or layout was restored.",
+    "Macros may be preserved but are never executed."
+  ]
+}

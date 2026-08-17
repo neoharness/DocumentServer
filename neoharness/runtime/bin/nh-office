@@ -22,6 +22,7 @@ WORKSPACE_ROOT = Path("/workspace")
 INPUT_ROOT = WORKSPACE_ROOT / "input"
 WORK_ROOT = WORKSPACE_ROOT / "work"
 OUTPUT_ROOT = WORKSPACE_ROOT / "output"
+ARTIFACT_READ_ROOTS = (INPUT_ROOT, WORK_ROOT, OUTPUT_ROOT)
 DEFAULT_MANIFEST = OUTPUT_ROOT / "nh-office-manifest.json"
 DEFAULT_TIMEOUT_SECONDS = 600.0
 DEFAULT_DIAGNOSTIC_LIMIT = 64 * 1024
@@ -31,6 +32,8 @@ EXIT_DATA = 65
 EXIT_ENGINE = 70
 EXIT_TIMEOUT = 124
 EXIT_SIGNAL = 143
+QUALITY_POLICY_SCHEMA = "ai.neoharness.office.quality-policy.v1"
+ARTIFACT_PROVENANCE_SCHEMA = "ai.neoharness.office.artifact-provenance.v1"
 
 
 class ContractError(ValueError):
@@ -65,7 +68,25 @@ def _exact_input(raw: str, root: Path, *, label: str) -> Path:
     return resolved
 
 
-def _exact_output(raw: str, *, label: str) -> Path:
+def _exact_artifact_input(raw: str, *, label: str) -> Path:
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ContractError(f"{label} must be an absolute path beneath /workspace")
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ContractError(f"{label} does not exist: {path}") from exc
+    if not any(_is_within(resolved, root) for root in ARTIFACT_READ_ROOTS):
+        raise ContractError(f"{label} must remain beneath /workspace")
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ContractError(f"{label} must be a regular file and not a symlink")
+    return resolved
+
+
+def _exact_output(
+    raw: str, *, label: str, require_absent: bool = False
+) -> Path:
     path = Path(raw)
     if not path.is_absolute():
         raise ContractError(f"{label} must be an absolute path beneath {OUTPUT_ROOT}")
@@ -77,6 +98,10 @@ def _exact_output(raw: str, *, label: str) -> Path:
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
             raise ContractError(f"{label} may only replace a regular file")
+        if require_absent:
+            raise ContractError(
+                f"{label} must be a fresh path so finalizer ownership is provable"
+            )
     return resolved
 
 
@@ -207,20 +232,48 @@ def _run_bounded(
     )
 
 
-def _artifact(path: Path) -> dict[str, object]:
+def _quality_policy_identity() -> dict[str, str]:
+    path = _install_root() / "share" / "runtime" / "quality-policy.v1.json"
+    try:
+        raw = path.read_bytes()
+        policy = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError(
+            f"installed quality policy is unavailable or invalid: {exc}"
+        ) from exc
+    if not isinstance(policy, dict) or policy.get("schema") != QUALITY_POLICY_SCHEMA:
+        raise ContractError("installed quality policy has an unsupported schema")
+    version = policy.get("version")
+    if not isinstance(version, str) or not version:
+        raise ContractError("installed quality policy has no version")
+    return {"version": version, "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _artifact(path: Path, *, quality_policy: dict[str, str]) -> dict[str, object]:
     info = path.lstat()
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise ContractError(f"produced output is not a regular no-follow file: {path}")
     resolved = path.resolve(strict=True)
     if not _is_within(resolved, OUTPUT_ROOT):
         raise ContractError(f"produced output escaped {OUTPUT_ROOT}: {path}")
-    return {
+    fact: dict[str, object] = {
         "path": str(path),
         "name": path.name,
         "size": info.st_size,
         "sha256": _sha256(path),
         "mime_type": _mime_type(path),
     }
+    fact["provenance"] = {
+        "schema": ARTIFACT_PROVENANCE_SCHEMA,
+        "policy": dict(quality_policy),
+        "finalizer": {
+            "class": "native_office",
+            "producer": "docbuilder",
+            "operation": "run",
+        },
+        "artifact": dict(fact),
+    }
+    return fact
 
 
 def _write_json_atomic(path: Path, value: object) -> None:
@@ -246,12 +299,20 @@ def _run(args: argparse.Namespace) -> int:
     started = time.monotonic()
     try:
         script = _exact_input(args.script, WORK_ROOT, label="script")
-        inputs = [_exact_input(item, INPUT_ROOT, label="input") for item in args.input]
-        outputs = [_exact_output(item, label="output") for item in args.output]
+        inputs = [_exact_artifact_input(item, label="input") for item in args.input]
+        outputs = [
+            _exact_output(item, label="output", require_absent=True)
+            for item in args.output
+        ]
         if not outputs:
             raise ContractError("at least one --output is required")
+        if len(set(outputs)) != len(outputs):
+            raise ContractError("each output path must be distinct")
         manifest_path = _exact_output(args.manifest, label="manifest")
+        if manifest_path in outputs:
+            raise ContractError("manifest path must be distinct from every output")
         user_argument = _load_argument(args.argument)
+        quality_policy = _quality_policy_identity()
     except (ContractError, OSError) as exc:
         print(f"nh-office: {exc}", file=sys.stderr)
         return EXIT_DATA
@@ -305,7 +366,7 @@ def _run(args: argparse.Namespace) -> int:
         if not output.exists() and not output.is_symlink():
             continue
         try:
-            artifacts.append(_artifact(output))
+            artifacts.append(_artifact(output, quality_policy=quality_policy))
         except (ContractError, OSError) as exc:
             artifact_errors.append(str(exc))
 
@@ -323,6 +384,7 @@ def _run(args: argparse.Namespace) -> int:
     manifest = {
         "schema": "ai.neoharness.office.runtime-result.v1",
         "runtime_version": _version(),
+        "quality_policy": quality_policy,
         "status": status,
         "exit_code": normalized_returncode,
         "engine_exit_code": returncode,
@@ -375,7 +437,10 @@ def _parser() -> argparse.ArgumentParser:
         "--input",
         action="append",
         default=[],
-        help="exact regular input file beneath /workspace/input; repeatable",
+        help=(
+            "exact regular file beneath /workspace/input, /workspace/work, or "
+            "/workspace/output; repeatable"
+        ),
     )
     run.add_argument(
         "--output",

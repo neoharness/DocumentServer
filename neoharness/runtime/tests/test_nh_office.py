@@ -39,6 +39,11 @@ class LauncherContractTests(unittest.TestCase):
             mock.patch.object(nh_office, "OUTPUT_ROOT", self.output),
             mock.patch.object(
                 nh_office,
+                "ARTIFACT_READ_ROOTS",
+                (self.input, self.work, self.output),
+            ),
+            mock.patch.object(
+                nh_office,
                 "DEFAULT_MANIFEST",
                 self.output / "nh-office-manifest.json",
             ),
@@ -50,6 +55,23 @@ class LauncherContractTests(unittest.TestCase):
         for patcher in reversed(self.patchers):
             patcher.stop()
         self.temporary.cleanup()
+
+    def _write_quality_policy(self, install_root: Path) -> None:
+        policy = install_root / "share/runtime/quality-policy.v1.json"
+        policy.parent.mkdir(parents=True)
+        policy.write_text(
+            json.dumps(
+                {
+                    "schema": "ai.neoharness.office.quality-policy.v1",
+                    "version": "neoharness-office-quality.v1",
+                    "finalizers": {"native_office": {}},
+                    "rules": {},
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     def test_input_requires_regular_no_follow_file_inside_exact_root(self) -> None:
         source = self.input / "source.docx"
@@ -80,6 +102,25 @@ class LauncherContractTests(unittest.TestCase):
         linked.symlink_to(target)
         with self.assertRaisesRegex(nh_office.ContractError, "regular file"):
             nh_office._exact_output(str(linked), label="output")
+
+        with self.assertRaisesRegex(nh_office.ContractError, "fresh path"):
+            nh_office._exact_output(
+                str(target), label="output", require_absent=True
+            )
+
+    def test_intermediate_and_produced_artifacts_can_be_reopened(self) -> None:
+        for root in (self.input, self.work, self.output):
+            source = root / "source.docx"
+            source.write_bytes(b"source")
+            self.assertEqual(
+                nh_office._exact_artifact_input(str(source), label="input"),
+                source,
+            )
+
+        outside = self.root / "outside.docx"
+        outside.write_bytes(b"outside")
+        with self.assertRaisesRegex(nh_office.ContractError, "must remain beneath"):
+            nh_office._exact_artifact_input(str(outside), label="input")
 
     def test_diagnostic_capture_is_bounded_but_counts_exact_bytes(self) -> None:
         command = [
@@ -120,6 +161,7 @@ class LauncherContractTests(unittest.TestCase):
         binary_root = install_root / "documentserver/server/FileConverter/bin"
         binary_root.mkdir(parents=True)
         (install_root / "VERSION").write_text("9.3.3-nh1\n", encoding="utf-8")
+        self._write_quality_policy(install_root)
         (binary_root / "AllFonts.js").write_text("font-cache\n", encoding="utf-8")
         engine = binary_root / "docbuilder"
         engine.write_text(
@@ -155,6 +197,14 @@ class LauncherContractTests(unittest.TestCase):
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["runtime_version"], "9.3.3-nh1")
         self.assertEqual(result["artifacts"][0]["size"], len(b"produced"))
+        provenance = result["artifacts"][0]["provenance"]
+        self.assertEqual(provenance["finalizer"]["class"], "native_office")
+        self.assertEqual(
+            provenance["artifact"]["sha256"], result["artifacts"][0]["sha256"]
+        )
+        self.assertEqual(
+            provenance["policy"]["sha256"], result["quality_policy"]["sha256"]
+        )
         self.assertEqual(result["diagnostics"]["stdout"], "engine-ok\n")
 
     def test_partial_multi_file_result_retains_successful_sibling(self) -> None:
@@ -162,6 +212,7 @@ class LauncherContractTests(unittest.TestCase):
         binary_root = install_root / "documentserver/server/FileConverter/bin"
         binary_root.mkdir(parents=True)
         (install_root / "VERSION").write_text("9.3.3-nh1\n", encoding="utf-8")
+        self._write_quality_policy(install_root)
         (binary_root / "AllFonts.js").write_text("font-cache\n", encoding="utf-8")
         engine = binary_root / "docbuilder"
         engine.write_text(
@@ -201,6 +252,70 @@ class LauncherContractTests(unittest.TestCase):
         self.assertEqual(len(result["artifacts"]), 1)
         self.assertEqual(result["artifacts"][0]["path"], str(outputs[0]))
         self.assertEqual(result["artifacts"][0]["size"], len(b"first-succeeded"))
+        self.assertEqual(
+            result["artifacts"][0]["provenance"]["finalizer"]["class"],
+            "native_office",
+        )
+
+    def test_missing_quality_policy_fails_before_engine_execution(self) -> None:
+        install_root = self.root / "install"
+        binary_root = install_root / "documentserver/server/FileConverter/bin"
+        binary_root.mkdir(parents=True)
+        engine_ran = self.root / "engine-ran"
+        engine = binary_root / "docbuilder"
+        engine.write_text(
+            "#!/usr/bin/python3\n"
+            f"import pathlib; pathlib.Path({str(engine_ran)!r}).touch()\n",
+            encoding="utf-8",
+        )
+        engine.chmod(0o755)
+        script = self.work / "edit.js"
+        script.write_text("// should not run\n", encoding="utf-8")
+        args = argparse.Namespace(
+            script=str(script),
+            input=[],
+            output=[str(self.output / "candidate.docx")],
+            argument=None,
+            manifest=str(self.output / "result.json"),
+            timeout=5,
+            max_diagnostic_bytes=1024,
+        )
+
+        with mock.patch.dict(os.environ, {"NHO_INSTALL_ROOT": str(install_root)}):
+            self.assertEqual(nh_office._run(args), nh_office.EXIT_DATA)
+        self.assertFalse(engine_ran.exists())
+
+    def test_preexisting_output_cannot_acquire_native_finalizer_provenance(self) -> None:
+        install_root = self.root / "install"
+        binary_root = install_root / "documentserver/server/FileConverter/bin"
+        binary_root.mkdir(parents=True)
+        self._write_quality_policy(install_root)
+        engine_ran = self.root / "engine-ran"
+        engine = binary_root / "docbuilder"
+        engine.write_text(
+            "#!/usr/bin/python3\n"
+            f"import pathlib; pathlib.Path({str(engine_ran)!r}).touch()\n",
+            encoding="utf-8",
+        )
+        engine.chmod(0o755)
+        script = self.work / "no-op.js"
+        script.write_text("// should not run\n", encoding="utf-8")
+        output = self.output / "candidate.docx"
+        output.write_bytes(b"written-by-an-unqualified-serializer")
+        args = argparse.Namespace(
+            script=str(script),
+            input=[],
+            output=[str(output)],
+            argument=None,
+            manifest=str(self.output / "result.json"),
+            timeout=5,
+            max_diagnostic_bytes=1024,
+        )
+
+        with mock.patch.dict(os.environ, {"NHO_INSTALL_ROOT": str(install_root)}):
+            self.assertEqual(nh_office._run(args), nh_office.EXIT_DATA)
+        self.assertFalse(engine_ran.exists())
+        self.assertEqual(output.read_bytes(), b"written-by-an-unqualified-serializer")
 
 
 if __name__ == "__main__":
