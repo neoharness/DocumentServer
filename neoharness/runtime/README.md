@@ -108,6 +108,16 @@ operations emit artifact-bound provenance containing its version and SHA-256
 digest. The publication boundary must verify server-observed provenance and
 the exact output hash; selected-agent-authored JSON is not authority.
 
+Disposable utility images enable `nh-office-finalizerd.service` and place the
+attested `nh-office` and `nh-document` clients first on the sandbox user's
+`PATH`. The root-owned broker runs the exact packaged finalizer as the calling
+unprivileged UID, records successful artifact provenance beneath its private
+runtime directory, and later qualifies only unchanged output bytes. The
+gateway queries that broker through `nh-artifact-qualify`; an ordinary JSON
+file in `/workspace` can never substitute for the broker's observation. The
+direct engine entry points remain in the package for build and recovery, but
+bytes produced by bypassing the broker have no publication authority.
+
 Images enter the same workspace unchanged and can be inspected or transformed
 without weakening the original-file boundary:
 

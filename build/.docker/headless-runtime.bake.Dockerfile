@@ -26,7 +26,8 @@ RUN mkdir -p \
         /opt/neoharness-office/documentserver/server/tools \
         /opt/neoharness-office/share/api-reference \
         /opt/neoharness-office/share/licenses \
-        /opt/neoharness-office/share/runtime
+        /opt/neoharness-office/share/runtime \
+        /opt/neoharness-office/share/systemd
 
 # Source-built native engine and tools. These named build contexts are wired to
 # the existing core and sdkjs Buildx targets by build/docker-bake.hcl.
@@ -104,12 +105,22 @@ COPY --chmod=755 neoharness/runtime/bin/nh-office \
     /opt/neoharness-office/bin/nh-office
 COPY --chmod=755 neoharness/runtime/bin/nh-document \
     /opt/neoharness-office/bin/nh-document
+COPY --chmod=755 neoharness/runtime/bin/nh-attested \
+    /opt/neoharness-office/bin/nh-attested
+COPY --chmod=755 neoharness/runtime/bin/nh-finalizerd \
+    /opt/neoharness-office/bin/nh-finalizerd
 COPY neoharness/runtime/python/neoharness_office/ \
     /opt/neoharness-office/lib/python3/neoharness_office/
+COPY neoharness/runtime/systemd/nh-office-finalizerd.service \
+    /opt/neoharness-office/share/systemd/nh-office-finalizerd.service
 RUN ln -s /opt/neoharness-office/bin/nh-office /usr/bin/nh-office \
     && ln -s /opt/neoharness-office/bin/nh-document /usr/bin/nh-document \
+    && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-office-attested \
+    && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-document-attested \
+    && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-artifact-qualify \
     && find /opt/neoharness-office /usr/bin/nh-office \
-        /usr/bin/nh-document \
+        /usr/bin/nh-document /usr/bin/nh-office-attested \
+        /usr/bin/nh-document-attested /usr/bin/nh-artifact-qualify \
         -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
 
 # Prove the assembled filesystem can execute the source-built engine before it
@@ -120,6 +131,8 @@ RUN mkdir -p /workspace/input /workspace/work /workspace/output \
 COPY neoharness/runtime/tests/package-smoke.js /workspace/work/package-smoke.js
 COPY neoharness/runtime/tests/test_document_helpers.py \
     /workspace/work/test_document_helpers.py
+COPY neoharness/runtime/tests/test_attestation.py \
+    /workspace/work/test_attestation.py
 RUN /opt/neoharness-office/bin/nh-office run \
         /workspace/work/package-smoke.js \
         --output /workspace/output/package-smoke.docx \
@@ -154,7 +167,9 @@ RUN /opt/neoharness-office/bin/nh-office run \
         /opt/neoharness-office/share/api-reference/pdf-apiBuilder.js)" \
         -gt 100000 \
     && PYTHONPATH=/opt/neoharness-office/lib/python3 \
-        python3 -m unittest -v /workspace/work/test_document_helpers.py
+        python3 -m unittest -v \
+            /workspace/work/test_document_helpers.py \
+            /workspace/work/test_attestation.py
 
 FROM ubuntu:24.04 AS artifacts
 
@@ -169,11 +184,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=payload /opt/neoharness-office/ /rootfs/opt/neoharness-office/
-RUN mkdir -p /rootfs/usr/bin \
+RUN mkdir -p /rootfs/usr/bin /rootfs/lib/systemd/system \
     && ln -s /opt/neoharness-office/bin/nh-office \
         /rootfs/usr/bin/nh-office \
     && ln -s /opt/neoharness-office/bin/nh-document \
-        /rootfs/usr/bin/nh-document
+        /rootfs/usr/bin/nh-document \
+    && ln -s /opt/neoharness-office/bin/nh-attested \
+        /rootfs/usr/bin/nh-office-attested \
+    && ln -s /opt/neoharness-office/bin/nh-attested \
+        /rootfs/usr/bin/nh-document-attested \
+    && ln -s /opt/neoharness-office/bin/nh-attested \
+        /rootfs/usr/bin/nh-artifact-qualify \
+    && cp /rootfs/opt/neoharness-office/share/systemd/nh-office-finalizerd.service \
+        /rootfs/lib/systemd/system/nh-office-finalizerd.service
 
 RUN set -eux; \
     mkdir -p /pkgroot/DEBIAN /out; \
@@ -184,7 +207,7 @@ RUN set -eux; \
       echo "Version: ${NHO_RUNTIME_VERSION}"; \
       echo "Architecture: ${TARGETARCH}"; \
       echo 'Maintainer: neoHarness <opensource@neoharness.ai>'; \
-      echo 'Depends: libc6 (>= 2.35), libgcc-s1, libstdc++6, python3 (>= 3.11), file, ghostscript, imagemagick, img2pdf, jpegoptim, libheif-examples, libimage-exiftool-perl, libraw-bin, librsvg2-bin, libvips-tools, ocrmypdf, optipng, pandoc, pngquant, poppler-utils, python3-docx, python3-lxml, python3-openpyxl, python3-pikepdf, python3-pil, qpdf, tesseract-ocr, tesseract-ocr-eng, unpaper, unzip, webp, zip'; \
+      echo 'Depends: libc6 (>= 2.35), libgcc-s1, libstdc++6, python3 (>= 3.11), file, ghostscript, imagemagick, img2pdf, jpegoptim, libheif-examples, libimage-exiftool-perl, libraw-bin, librsvg2-bin, libvips-tools, ocrmypdf, optipng, pandoc, pngquant, poppler-utils, python3-docx, python3-lxml, python3-openpyxl, python3-pikepdf, python3-pil, qpdf, tesseract-ocr, tesseract-ocr-eng, unpaper, unzip, util-linux, webp, zip'; \
       echo "Installed-Size: ${installed_size}"; \
       echo 'Section: editors'; \
       echo 'Priority: optional'; \
@@ -225,7 +248,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=payload /opt/neoharness-office/ /opt/neoharness-office/
 RUN ln -s /opt/neoharness-office/bin/nh-office /usr/bin/nh-office \
-    && ln -s /opt/neoharness-office/bin/nh-document /usr/bin/nh-document
+    && ln -s /opt/neoharness-office/bin/nh-document /usr/bin/nh-document \
+    && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-office-attested \
+    && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-document-attested \
+    && ln -s /opt/neoharness-office/bin/nh-attested /usr/bin/nh-artifact-qualify
 
 LABEL org.opencontainers.image.title="neoHarness Office headless runtime" \
       org.opencontainers.image.version="${NHO_RUNTIME_VERSION}" \

@@ -55,6 +55,13 @@ A JSON claim supplied by selected-agent code is not publication authority.
 All utilities remain callable; the policy governs which exact bytes qualify as
 a user-facing deliverable.
 
+In the disposable utility image, invoke `nh-office` and `nh-document` from the
+normal `PATH`; those names are attested clients backed by the root-owned local
+finalizer broker. Do not call `/opt/neoharness-office/bin/nh-office` or
+`/opt/neoharness-office/bin/nh-document` directly. Direct invocation remains
+available for package recovery but intentionally produces no server
+attestation and therefore cannot be published.
+
 Raw, version-matched API Builder sources are installed at:
 
 ```text

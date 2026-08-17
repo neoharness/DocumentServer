@@ -1,0 +1,23 @@
+[Unit]
+Description=neoHarness Office finalizer attestation broker
+After=local-fs.target
+Before=sshd.service
+
+[Service]
+Type=simple
+ExecStart=/opt/neoharness-office/bin/nh-finalizerd
+Restart=on-failure
+RestartSec=1s
+RuntimeDirectory=neoharness-office
+RuntimeDirectoryMode=0755
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/workspace /run/neoharness-office
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=multi-user.target
