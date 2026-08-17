@@ -12,7 +12,7 @@
 	url = https://github.com/Euro-Office/core-fonts.git
 [submodule "core"]
 	path = core
-	url = https://github.com/Euro-Office/core.git
+	url = https://github.com/neoharness/core.git
 [submodule "document-server-integration"]
 	path = document-server-integration
 	url = https://github.com/Euro-Office/document-server-integration.git
