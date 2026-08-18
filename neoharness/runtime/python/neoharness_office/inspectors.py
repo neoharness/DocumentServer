@@ -471,6 +471,17 @@ def _inspect_docx(archive: zipfile.ZipFile) -> dict[str, object]:
         styles = len(_xml(archive, "word/styles.xml").findall(".//w:style", NS))
     headers = [name for name in names if re.match(r"word/header\d+\.xml$", name)]
     footers = [name for name in names if re.match(r"word/footer\d+\.xml$", name)]
+    body_drawing_count = len(root.findall(".//w:drawing", NS)) + len(
+        root.findall(".//w:pict", NS)
+    )
+    header_drawing_count = sum(
+        len(part.findall(".//w:drawing", NS)) + len(part.findall(".//w:pict", NS))
+        for part in (_xml(archive, name) for name in headers)
+    )
+    footer_drawing_count = sum(
+        len(part.findall(".//w:drawing", NS)) + len(part.findall(".//w:pict", NS))
+        for part in (_xml(archive, name) for name in footers)
+    )
     return {
         "format": "docx",
         "paragraph_count": len(paragraphs),
@@ -483,8 +494,12 @@ def _inspect_docx(archive: zipfile.ZipFile) -> dict[str, object]:
         "field_instruction_count": len(root.findall(".//w:instrText", NS))
         + len(root.findall(".//w:fldSimple", NS)),
         "content_control_count": len(root.findall(".//w:sdt", NS)),
-        "drawing_count": len(root.findall(".//w:drawing", NS))
-        + len(root.findall(".//w:pict", NS)),
+        "drawing_count": body_drawing_count
+        + header_drawing_count
+        + footer_drawing_count,
+        "body_drawing_count": body_drawing_count,
+        "header_drawing_count": header_drawing_count,
+        "footer_drawing_count": footer_drawing_count,
         "tracked_insert_count": len(root.findall(".//w:ins", NS)),
         "tracked_delete_count": len(root.findall(".//w:del", NS)),
         "bookmark_count": len(root.findall(".//w:bookmarkStart", NS)),

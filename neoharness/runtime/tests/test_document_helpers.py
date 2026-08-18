@@ -209,6 +209,32 @@ class DocumentHelperTests(unittest.TestCase):
         self.assertEqual(semantic["tracked_insert_count"], 1)
         self.assertIn("Actual starting state", semantic["text_sample"])
 
+    def test_docx_inventory_counts_body_header_and_footer_drawings(self) -> None:
+        path = self.root / "branded.docx"
+        document = """<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body><w:p><w:r><w:drawing/></w:r></w:p></w:body>
+        </w:document>"""
+        header = """<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:p><w:r><w:drawing/></w:r><w:r><w:pict/></w:r></w:p>
+        </w:hdr>"""
+        footer = """<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:p><w:r><w:drawing/></w:r></w:p>
+        </w:ftr>"""
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", CONTENT_TYPES)
+            archive.writestr("word/document.xml", document)
+            archive.writestr("word/header1.xml", header)
+            archive.writestr("word/footer2.xml", footer)
+
+        semantic = inspect_file(path)["inspection"]["semantic"]
+
+        self.assertEqual(semantic["drawing_count"], 4)
+        self.assertEqual(semantic["body_drawing_count"], 1)
+        self.assertEqual(semantic["header_drawing_count"], 2)
+        self.assertEqual(semantic["footer_drawing_count"], 1)
+        self.assertEqual(semantic["header_parts"], ["word/header1.xml"])
+        self.assertEqual(semantic["footer_parts"], ["word/footer2.xml"])
+
     def test_package_comparison_reports_changed_part_and_macro_preservation(
         self,
     ) -> None:
