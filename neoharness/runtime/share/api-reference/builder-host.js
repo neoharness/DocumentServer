@@ -137,5 +137,41 @@
 //   builder.SaveFile("xlsx", "jsValue(outputPath)");
 //   builder.CloseFile();
 //
+//
+// ============================================================================
+// API.CREATEIMAGE
+// ============================================================================
+// Api.CreateImage(source, widthEmu, heightEmu) returns a raster drawing.
+// It does not insert the drawing by itself; attach the returned object to a
+// paragraph (or another supported container) with AddDrawing.
+// source must be a data URI: "data:image/png;base64,..." or
+// "data:image/jpeg;base64,...".  File paths and file:// URIs silently
+// produce an empty media directory — never use them.
+// Use only when adding genuinely new images; existing source assets carry
+// forward naturally when you open and modify the supplied DOCX rather than
+// authoring from a blank document.
+//
+//   var logoUri = "data:image/png;base64," + Argument["argument"]["logo_b64"];
+//   var image = Api.CreateImage(logoUri, 3000000, 900000);  // EMU
+//   Api.GetDocument().GetCurrentParagraph().AddDrawing(image);
+//
+// ============================================================================
+// PDF EXPORT AFTER ADDING A NEW IMAGE
+// ============================================================================
+// Existing images in a DOCX opened with builder.OpenFile carry through a
+// direct builder.SaveFile("pdf"). If the current script adds a NEW in-memory
+// image with Api.CreateImage, direct PDF save fails with a deterministic
+// engine error. Save the DOCX first, then reopen it before exporting to PDF:
+//
+//   var docxPath = Argument["outputs"][0];
+//   builder.SaveFile("docx", "jsValue(docxPath)");
+//   builder.CloseFile();
+//   var reopenPath = Argument["outputs"][0];  // re-declare after CloseFile
+//   builder.OpenFile("jsValue(reopenPath)");
+//   var pdfPath = Argument["outputs"][1];
+//   builder.SaveFile("pdf", "jsValue(pdfPath)");
+//   builder.CloseFile();
+// Declare two --output arguments only for this fallback.
+//
 // The launcher (nh-office run) supplies Argument as parsed JSON with keys
 // input, inputs, output, outputs, and argument (the caller's own JSON).

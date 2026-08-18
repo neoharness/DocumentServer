@@ -73,6 +73,18 @@ sheet.GetRange(options.value_columns || "C:H").SetColumnWidth(14);
 
 builder.SaveFile("xlsx", "jsValue(outputPath)");
 builder.CloseFile();''',
+    "docx-to-pdf": BRIDGE_COMMENT + r'''
+// Native DOCX-to-PDF conversion that preserves supplied visual identity.
+// Open the source DOCX so its headers, footers, media, fonts, colors, and
+// layout carry forward. Modify the opened model, then save a fresh output;
+// never overwrite the input:
+var inputPath = Argument["input"];
+var pdfPath = Argument["output"];
+builder.OpenFile("jsValue(inputPath)");
+// Make revisions through the Word document surface here.
+builder.SaveFile("pdf", "jsValue(pdfPath)");
+builder.CloseFile();''',
+
     "docx-revise": BRIDGE_COMMENT + r'''
 var inputPath = Argument["input"];
 var outputPath = Argument["output"];
@@ -144,8 +156,8 @@ var outputPath = Argument["output"];
 builder.SaveFile("pptx", "jsValue(outputPath)");
 builder.CloseFile();''',
     "pdf-create": BRIDGE_COMMENT + r'''
-// Native from-scratch PDF. Author content through the Word document surface,
-// then save as PDF; builder.CreateFile("docx") is intentional here.
+// Native from-scratch PDF. Author content through the Word document surface;
+// builder.CreateFile("docx") is intentional here.
 builder.CreateFile("docx");
 var document = Api.GetDocument();
 document.GetElement(0).AddText("Document title from inspected evidence");
@@ -153,6 +165,11 @@ var paragraph = Api.CreateParagraph();
 paragraph.AddText("Body text grounded in the workspace evidence");
 document.Push(paragraph);
 // Exact paragraph/run/table methods: word-apiBuilder.js.
+//
+// Existing images in an opened source DOCX export directly. If this script
+// adds a NEW in-memory image with CreateImage, use the save-close-reopen
+// fallback documented in builder-host.js.
+//
 var outputPath = Argument["output"];
 builder.SaveFile("pdf", "jsValue(outputPath)");
 builder.CloseFile();''',

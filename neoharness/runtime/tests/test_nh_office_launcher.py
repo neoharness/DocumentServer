@@ -46,6 +46,7 @@ class ExampleTopicTests(unittest.TestCase):
             for family in ("docx", "xlsx", "pptx", "pdf")
             for operation in ("revise", "create")
         }
+        expected.add("docx-to-pdf")
         self.assertEqual(set(LAUNCHER.EXAMPLES), expected)
 
     def test_every_example_teaches_the_literal_bridge(self) -> None:
@@ -69,6 +70,32 @@ class ExampleTopicTests(unittest.TestCase):
         self.assertIn('builder.SaveFile("pdf"', LAUNCHER.EXAMPLES["pdf-create"])
         for topic in ("docx-create", "xlsx-create", "pptx-create", "pdf-create"):
             self.assertNotIn("OpenFile", LAUNCHER.EXAMPLES[topic], topic)
+
+    def test_docx_to_pdf_opens_source_and_saves_directly(self) -> None:
+        script = LAUNCHER.EXAMPLES["docx-to-pdf"]
+        self.assertNotIn("CreateFile", script)
+        open_source = script.index('builder.OpenFile("jsValue(inputPath)")')
+        save_pdf = script.index('builder.SaveFile("pdf"')
+        self.assertLess(open_source, save_pdf)
+        self.assertIn('Argument["output"]', script)
+        self.assertNotIn('Argument["outputs"]', script)
+        self.assertNotIn('builder.SaveFile("docx"', script)
+        self.assertIn("never overwrite the input", script)
+
+    def test_create_image_reference_inserts_returned_drawing(self) -> None:
+        candidates = (
+            SOURCE_ROOT / "share" / "api-reference" / "builder-host.js",
+            Path(
+                "/opt/neoharness-office/share/api-reference/builder-host.js"
+            ),
+        )
+        reference_path = next(path for path in candidates if path.is_file())
+        reference = reference_path.read_text(encoding="utf-8")
+        self.assertIn("var image = Api.CreateImage", reference)
+        self.assertIn("AddDrawing(image)", reference)
+        self.assertIn("does not insert the drawing by itself", reference)
+        self.assertIn("Existing images in a DOCX", reference)
+        self.assertIn("only for this fallback", reference)
 
 
 class BridgePreflightTests(unittest.TestCase):

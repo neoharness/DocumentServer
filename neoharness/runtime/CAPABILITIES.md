@@ -96,7 +96,11 @@ paths must cross the host boundary through the quoted `jsValue` bridge —
 never as bare `Argument.*` expressions inside a `builder.*()` call, which
 `nh-office run` now refuses before any engine launch with the exact
 corrective syntax. `nh-office examples` provides both `*-revise` and
-`*-create` starters for docx, xlsx, pptx, and pdf. Failed runs classify
+`*-create` starters for docx, xlsx, pptx, and pdf, plus a `docx-to-pdf`
+starter that opens a supplied DOCX and exports it directly so existing
+headers, footers, media, fonts, colors, and layout carry forward. A documented
+save-close-reopen fallback covers scripts that add a new in-memory image.
+Failed runs classify
 themselves in the manifest `failure` object (`timeout`,
 `terminated_by_signal`, `engine_silent_failure`, `js_exception`,
 `engine_error`, `missing_artifact`) using launcher-observable facts plus
