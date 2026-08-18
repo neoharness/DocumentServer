@@ -40,7 +40,9 @@ def _inside_any(path: Path, roots: tuple[Path, ...]) -> bool:
 def exact_read_file(raw: str | Path, *, roots: tuple[Path, ...] = READ_ROOTS) -> Path:
     path = Path(raw)
     if not path.is_absolute():
-        raise WorkspaceContractError("file path must be absolute beneath /workspace")
+        raise WorkspaceContractError(
+            f"file path must be absolute beneath /workspace: got {str(path)!r}"
+        )
     try:
         resolved = path.resolve(strict=True)
     except FileNotFoundError as exc:
@@ -56,7 +58,9 @@ def exact_read_file(raw: str | Path, *, roots: tuple[Path, ...] = READ_ROOTS) ->
 def exact_write_file(raw: str | Path, *, roots: tuple[Path, ...] = WRITE_ROOTS) -> Path:
     path = Path(raw)
     if not path.is_absolute():
-        raise WorkspaceContractError("output path must be absolute beneath /workspace")
+        raise WorkspaceContractError(
+            f"output path must be absolute beneath /workspace: got {str(path)!r}"
+        )
     try:
         parent = path.parent.resolve(strict=True)
     except FileNotFoundError as exc:

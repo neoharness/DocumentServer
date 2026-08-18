@@ -652,6 +652,121 @@ def inspect_file(path: Path) -> dict[str, object]:
     return result
 
 
+_A1_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9_.])(\$?)([A-Za-z]{1,3})(\$?)([1-9][0-9]{0,6})(?![0-9A-Za-z_(])"
+)
+_MAX_COLUMN = 16_384
+_MAX_ROW = 1_048_576
+
+
+class _UntranslatableFormula(ValueError):
+    """A shared-formula translation left the worksheet coordinate space."""
+
+
+def _column_number(letters: str) -> int:
+    value = 0
+    for character in letters.upper():
+        value = value * 26 + (ord(character) - 64)
+    return value
+
+
+def _column_letters(number: int) -> str:
+    output = ""
+    while number > 0:
+        number, remainder = divmod(number - 1, 26)
+        output = chr(65 + remainder) + output
+    return output
+
+
+def _reference_coordinates(reference: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"\$?([A-Za-z]{1,3})\$?([1-9][0-9]{0,6})", reference)
+    if match is None:
+        return None
+    return _column_number(match.group(1)), int(match.group(2))
+
+
+def _translate_formula(text: str, from_reference: str, to_reference: str) -> str | None:
+    """Translate a shared-formula master onto a follower cell (A1 semantics).
+
+    Relative references shift by the master→follower offset; anchored parts
+    stay fixed. String literals ("..."), quoted sheet names ('...'), and
+    bracketed structured/external references ([...]) pass through untouched.
+    Returns None when a translation would leave the worksheet grid, so the
+    caller can fall back to the raw comparison instead of guessing.
+    """
+
+    origin = _reference_coordinates(from_reference)
+    target = _reference_coordinates(to_reference)
+    if origin is None or target is None:
+        return None
+    column_delta = target[0] - origin[0]
+    row_delta = target[1] - origin[1]
+    if column_delta == 0 and row_delta == 0:
+        return text
+
+    def _shift(match: re.Match[str]) -> str:
+        column_anchor, letters, row_anchor, digits = match.groups()
+        column = _column_number(letters)
+        row = int(digits)
+        if not column_anchor:
+            column += column_delta
+        if not row_anchor:
+            row += row_delta
+        if not (1 <= column <= _MAX_COLUMN and 1 <= row <= _MAX_ROW):
+            raise _UntranslatableFormula(match.group(0))
+        letters_output = letters if column_anchor else _column_letters(column)
+        return f"{column_anchor}{letters_output}{row_anchor}{row}"
+
+    output: list[str] = []
+    index = 0
+    length = len(text)
+    try:
+        while index < length:
+            character = text[index]
+            if character == '"' or character == "'":
+                quote = character
+                stop = index + 1
+                while stop < length:
+                    if text[stop] == quote:
+                        if stop + 1 < length and text[stop + 1] == quote:
+                            stop += 2
+                            continue
+                        stop += 1
+                        break
+                    stop += 1
+                else:
+                    stop = length
+                output.append(text[index:stop])
+                index = stop
+                continue
+            if character == "[":
+                stop = text.find("]", index + 1)
+                stop = length if stop == -1 else stop + 1
+                output.append(text[index:stop])
+                index = stop
+                continue
+            stop = index
+            while stop < length and text[stop] not in "\"'[":
+                stop += 1
+            output.append(_A1_TOKEN.sub(_shift, text[index:stop]))
+            index = stop
+    except _UntranslatableFormula:
+        return None
+    return "".join(output)
+
+
+def _formula_storage_kind(record: dict[str, object]) -> str:
+    attributes = record.get("attributes")
+    kind = ""
+    if isinstance(attributes, dict):
+        kind = str(attributes.get("t", ""))
+    if kind == "shared":
+        return "shared_master" if record.get("text") else "shared_follower"
+    if kind in {"array", "dataTable"}:
+        return kind
+    return "explicit"
+
+
 def _part_hashes(path: Path) -> dict[str, str]:
     with zipfile.ZipFile(path) as archive:
         _archive_facts(archive)
@@ -688,14 +803,38 @@ def _xlsx_comparison_facts(archive: zipfile.ZipFile) -> dict[str, object]:
         if not path or path not in archive.namelist():
             continue
         root = _xml(archive, path)
+        raw_cells: list[tuple[str, str, dict[str, str]]] = []
+        shared_masters: dict[str, tuple[str, str]] = {}
         for cell in root.findall(".//s:c", NS):
             formula = cell.find("s:f", NS)
             reference = cell.attrib.get("r")
             if formula is None or not reference:
                 continue
-            formulas[(name, reference.upper())] = {
-                "text": formula.text or "",
-                "attributes": dict(sorted(formula.attrib.items())),
+            reference = reference.upper()
+            text = formula.text or ""
+            attributes = dict(sorted(formula.attrib.items()))
+            raw_cells.append((reference, text, attributes))
+            if attributes.get("t") == "shared" and text:
+                shared_index = attributes.get("si", "")
+                shared_masters.setdefault(shared_index, (reference, text))
+        for reference, text, attributes in raw_cells:
+            effective: str | None = text
+            effective_class = "normal"
+            kind = attributes.get("t", "")
+            if kind == "shared" and not text:
+                master = shared_masters.get(attributes.get("si", ""))
+                effective = (
+                    _translate_formula(master[1], master[0], reference)
+                    if master
+                    else None
+                )
+            elif kind in {"array", "dataTable"}:
+                effective_class = kind
+            formulas[(name, reference)] = {
+                "text": text,
+                "attributes": attributes,
+                "effective": effective,
+                "effective_class": effective_class,
             }
     sheet_order = [
         sheet.attrib.get("name", "") for sheet in workbook.findall(".//s:sheet", NS)
@@ -735,16 +874,47 @@ def _compare_xlsx_facts(
     after_formulas = after_facts["formulas"]
     assert isinstance(before_formulas, dict)
     assert isinstance(after_formulas, dict)
-    formula_changes = [
-        {
-            "sheet": sheet,
-            "cell": cell,
-            "before": before_formulas.get((sheet, cell)),
-            "after": after_formulas.get((sheet, cell)),
-        }
-        for sheet, cell in sorted(set(before_formulas) | set(after_formulas))
-        if before_formulas.get((sheet, cell)) != after_formulas.get((sheet, cell))
-    ]
+    formula_changes: list[dict[str, object]] = []
+    formula_normalizations: list[dict[str, object]] = []
+    for sheet, cell in sorted(set(before_formulas) | set(after_formulas)):
+        before_record = before_formulas.get((sheet, cell))
+        after_record = after_formulas.get((sheet, cell))
+        if before_record == after_record:
+            continue
+        translated = (
+            before_record is not None
+            and after_record is not None
+            and before_record.get("effective") is not None
+            and after_record.get("effective") is not None
+        )
+        if (
+            translated
+            and before_record["effective"] == after_record["effective"]
+            and before_record["effective_class"] == after_record["effective_class"]
+        ):
+            # The effective per-cell formula is unchanged; only the shared
+            # master/index/ref storage was renormalized. Report it separately
+            # so reshuffling noise can never displace a true formula change.
+            formula_normalizations.append(
+                {
+                    "sheet": sheet,
+                    "cell": cell,
+                    "before_storage": _formula_storage_kind(before_record),
+                    "after_storage": _formula_storage_kind(after_record),
+                    "shared_index_before": before_record["attributes"].get("si"),
+                    "shared_index_after": after_record["attributes"].get("si"),
+                    "effective": before_record["effective"],
+                }
+            )
+            continue
+        formula_changes.append(
+            {
+                "sheet": sheet,
+                "cell": cell,
+                "before": before_record,
+                "after": after_record,
+            }
+        )
 
     before_states = before_facts["sheet_states"]
     after_states = after_facts["sheet_states"]
@@ -779,6 +949,7 @@ def _compare_xlsx_facts(
     ]
     return {
         "formulas": _bounded_changes(formula_changes),
+        "formula_normalizations": _bounded_changes(formula_normalizations),
         "sheet_states": _bounded_changes(sheet_state_changes),
         "defined_names": _bounded_changes(defined_name_changes),
     }
@@ -890,7 +1061,7 @@ def compare_files(before: Path, after: Path) -> dict[str, object]:
     before_fact = file_fact(before, mime_type=_file_mime(before))
     after_fact = file_fact(after, mime_type=_file_mime(after))
     result: dict[str, object] = {
-        "schema": "ai.neoharness.office.document-comparison.v2",
+        "schema": "ai.neoharness.office.document-comparison.v3",
         "before": before_fact,
         "after": after_fact,
         "byte_identical": before_fact["sha256"] == after_fact["sha256"],

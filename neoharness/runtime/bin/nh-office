@@ -9,6 +9,7 @@ import json
 import mimetypes
 import os
 from pathlib import Path
+import re
 import selectors
 import signal
 import stat
@@ -37,8 +38,18 @@ QUALITY_POLICY_SCHEMA = "ai.neoharness.office.quality-policy.v1"
 ARTIFACT_PROVENANCE_SCHEMA = "ai.neoharness.office.artifact-provenance.v1"
 
 
+# Every example must carry this bridge explanation verbatim so a model that
+# reads any single topic learns the host-path contract.
+BRIDGE_COMMENT = '''// "jsValue(inputPath)" and "jsValue(outputPath)" below are LITERAL Document
+// Builder host bridges: keep the quotes and text exactly as written. The
+// engine resolves the named JavaScript variable itself. Never pass a bare
+// Argument.input or Argument.output inside a builder.*() call — native
+// command arguments are parsed as quoted strings, not JavaScript, so the
+// path would arrive empty and the save/open would fail.'''
+
 EXAMPLES: dict[str, str] = {
-    "xlsx-revise": r'''// Inspect the real workbook first. Replace the sheet and ranges below with
+    "xlsx-revise": BRIDGE_COMMENT + r'''
+// Inspect the real workbook first. Replace the sheet and ranges below with
 // coordinates established from that inspection; never assume A1 is a header.
 var inputPath = Argument["input"];
 var outputPath = Argument["output"];
@@ -62,7 +73,8 @@ sheet.GetRange(options.value_columns || "C:H").SetColumnWidth(14);
 
 builder.SaveFile("xlsx", "jsValue(outputPath)");
 builder.CloseFile();''',
-    "docx-revise": r'''var inputPath = Argument["input"];
+    "docx-revise": BRIDGE_COMMENT + r'''
+var inputPath = Argument["input"];
 var outputPath = Argument["output"];
 
 builder.OpenFile("jsValue(inputPath)");
@@ -70,7 +82,8 @@ var document = Api.GetDocument();
 // Inspect the document first, then use exact methods from word-apiBuilder.js.
 builder.SaveFile("docx", "jsValue(outputPath)");
 builder.CloseFile();''',
-    "pptx-revise": r'''var inputPath = Argument["input"];
+    "pptx-revise": BRIDGE_COMMENT + r'''
+var inputPath = Argument["input"];
 var outputPath = Argument["output"];
 
 builder.OpenFile("jsValue(inputPath)");
@@ -78,7 +91,8 @@ var presentation = Api.GetPresentation();
 // Inspect masters, layouts, slides, placeholders, charts, and notes first.
 builder.SaveFile("pptx", "jsValue(outputPath)");
 builder.CloseFile();''',
-    "pdf-revise": r'''var inputPath = Argument["input"];
+    "pdf-revise": BRIDGE_COMMENT + r'''
+var inputPath = Argument["input"];
 var outputPath = Argument["output"];
 
 builder.OpenFile("jsValue(inputPath)");
@@ -86,7 +100,120 @@ var document = Api.GetDocument();
 // Inspect pages, forms, annotations, signatures, and permissions first.
 builder.SaveFile("pdf", "jsValue(outputPath)");
 builder.CloseFile();''',
+    "docx-create": BRIDGE_COMMENT + r'''
+// Native from-scratch Word document. No input file is opened.
+builder.CreateFile("docx");
+var document = Api.GetDocument();
+document.GetElement(0).AddText("Title established from inspected evidence");
+var paragraph = Api.CreateParagraph();
+paragraph.AddText("Body text. Build real content from the workspace evidence");
+document.Push(paragraph);
+// Exact paragraph/run/table methods: word-apiBuilder.js. Keep builder.*()
+// calls at the top level of the script; a builder.*() line inside an if/try
+// block splits the surrounding JavaScript into broken fragments.
+var outputPath = Argument["output"];
+builder.SaveFile("docx", "jsValue(outputPath)");
+builder.CloseFile();''',
+    "xlsx-create": BRIDGE_COMMENT + r'''
+// Native from-scratch workbook. No input file is opened.
+builder.CreateFile("xlsx");
+var sheet = Api.GetActiveSheet();
+sheet.SetName("Summary");
+sheet.GetRange("A1").SetValue("Label");
+sheet.GetRange("B1").SetValue(21);
+sheet.GetRange("B2").SetValue(2);
+sheet.GetRange("B3").SetValue("=B1*B2");
+// Exact range/format methods: cell-apiBuilder.js.
+var outputPath = Argument["output"];
+builder.SaveFile("xlsx", "jsValue(outputPath)");
+builder.CloseFile();''',
+    "pptx-create": BRIDGE_COMMENT + r'''
+// Native from-scratch presentation. No input file is opened.
+builder.CreateFile("pptx");
+var presentation = Api.GetPresentation();
+var slide = presentation.GetSlideByIndex(0);
+slide.RemoveAllObjects();
+var fill = Api.CreateSolidFill(Api.RGB(27, 102, 201));
+var stroke = Api.CreateStroke(0, Api.CreateNoFill());
+var shape = Api.CreateShape("roundRect", 220 * 36000, 55 * 36000, fill, stroke);
+shape.SetPosition(30 * 36000, 35 * 36000);
+shape.GetContent().GetElement(0).AddText("Slide title from inspected evidence");
+slide.AddObject(shape);
+// Exact slide/shape methods: slide-apiBuilder.js.
+var outputPath = Argument["output"];
+builder.SaveFile("pptx", "jsValue(outputPath)");
+builder.CloseFile();''',
+    "pdf-create": BRIDGE_COMMENT + r'''
+// Native from-scratch PDF. Author content through the Word document surface,
+// then save as PDF; builder.CreateFile("docx") is intentional here.
+builder.CreateFile("docx");
+var document = Api.GetDocument();
+document.GetElement(0).AddText("Document title from inspected evidence");
+var paragraph = Api.CreateParagraph();
+paragraph.AddText("Body text grounded in the workspace evidence");
+document.Push(paragraph);
+// Exact paragraph/run/table methods: word-apiBuilder.js.
+var outputPath = Argument["output"];
+builder.SaveFile("pdf", "jsValue(outputPath)");
+builder.CloseFile();''',
 }
+
+
+BRIDGE_TOKEN = re.compile(r"\bArgument\.(input|output)\b")
+BRIDGE_CALL = re.compile(r"^\s*builder\.(\w+)\s*\(")
+QUOTED_SPAN = re.compile(r'"[^"]*"')
+
+
+def bridge_misuse_findings(script_text: str) -> list[dict[str, object]]:
+    """Detect the one proven host-bridge misuse before any engine launch.
+
+    Narrow by design: only a bare ``Argument.input``/``Argument.output`` in
+    the argument list of a line-leading ``builder.*()`` native command is
+    flagged — the exact failure that produced empty-path save errors. The
+    engine parses such lines itself and only extracts quote-delimited
+    strings, so a bare JavaScript expression can never reach it. Quoted
+    text (including the literal "jsValue(name)" bridge) always passes.
+    """
+
+    findings: list[dict[str, object]] = []
+    for number, line in enumerate(script_text.splitlines(), start=1):
+        call = BRIDGE_CALL.match(line)
+        if call is None:
+            continue
+        remainder = QUOTED_SPAN.sub('""', line[call.end() - 1 :])
+        misuse = BRIDGE_TOKEN.search(remainder)
+        if misuse is None:
+            continue
+        findings.append(
+            {
+                "line": number,
+                "method": call.group(1),
+                "token": f"Argument.{misuse.group(1)}",
+            }
+        )
+    return findings
+
+
+def bridge_misuse_message(findings: list[dict[str, object]]) -> str:
+    first = findings[0]
+    sites = ", ".join(
+        f"line {item['line']}: builder.{item['method']}(... {item['token']} ...)"
+        for item in findings[:8]
+    )
+    return (
+        f"bridge_contract: {sites}. The Document Builder native command parser "
+        "only reads quote-delimited strings, so a bare JavaScript expression "
+        "arrives as an empty path (the historical 'save file error (88)' / "
+        "'Empty sFileFrom or sFileTo' failure). Use the literal jsValue "
+        "bridge instead:\n"
+        f"  var outputPath = Argument[\"output\"];\n"
+        f"  builder.{first['method']}(\"docx\", \"jsValue(outputPath)\");\n"
+        "  var inputPath = Argument[\"input\"];\n"
+        "  builder.OpenFile(\"jsValue(inputPath)\");\n"
+        "The quoted \"jsValue(name)\" text is passed through exactly as "
+        "written; the engine resolves the JavaScript variable itself. Static "
+        "literal workspace paths in quotes also remain valid."
+    )
 
 
 class ContractError(ValueError):
@@ -353,10 +480,120 @@ def _examples(args: argparse.Namespace) -> int:
     return 0
 
 
+_JS_EXCEPTION = re.compile(
+    r"^.*\b(SyntaxError|ReferenceError|TypeError|RangeError)\b.*$", re.MULTILINE
+)
+
+
+def _classify_failure(
+    *,
+    status: str,
+    engine_returncode: int,
+    stdout_text: str,
+    stderr_text: str,
+    expected_outputs: Sequence[Path],
+    artifacts: Sequence[dict[str, object]],
+    artifact_errors: Sequence[str],
+) -> dict[str, object] | None:
+    """Classify a failed run from launcher-observable facts only.
+
+    Every branch is derived from the exit status and the captured streams;
+    hints describe mechanisms reproduced against this exact engine, never
+    invented details about the specific run.
+    """
+
+    if status == "succeeded":
+        return None
+    if status == "timed_out":
+        return {
+            "class": "timeout",
+            "detail": "the engine exceeded the wall timeout and was terminated",
+        }
+    if status == "terminated":
+        return {
+            "class": "terminated_by_signal",
+            "signal": -engine_returncode,
+        }
+    diagnostics = f"{stdout_text}\n{stderr_text}"
+    if engine_returncode != 0:
+        if not stdout_text.strip() and not stderr_text.strip():
+            return {
+                "class": "engine_silent_failure",
+                "detail": (
+                    "the engine exited nonzero without emitting any stdout or "
+                    "stderr"
+                ),
+                "hint": (
+                    "reproduced cause: a file-open native command that fails "
+                    "silently (for example an empty path from a host-bridge "
+                    "misuse) also discards every queued script statement, so "
+                    "nothing ever prints; verify OpenFile/SaveFile arguments "
+                    'use the literal "jsValue(variableName)" bridge and that '
+                    "declared inputs exist"
+                ),
+            }
+        exception_line = _JS_EXCEPTION.search(diagnostics)
+        if exception_line is not None:
+            failure: dict[str, object] = {
+                "class": "js_exception",
+                "evidence": exception_line.group(0).strip()[:400],
+            }
+            if "Unexpected end of input" in diagnostics:
+                failure["hint"] = (
+                    "the engine executes each line whose trimmed start is "
+                    "builder.* as a native command and splits the surrounding "
+                    "JavaScript into separate chunks; a builder.*() call "
+                    "inside an if/try/loop block truncates that block — keep "
+                    "builder.*() calls at the top level of the script"
+                )
+            elif "builder is not defined" in diagnostics:
+                failure["hint"] = (
+                    "builder is not a JavaScript global; it is only a native "
+                    "command at the start of a line, so pure JavaScript "
+                    "expressions (typeof builder, builder.X inside larger "
+                    "expressions) cannot reference it"
+                )
+            return failure
+        if (
+            "Empty sFileFrom or sFileTo" in diagnostics
+            or "save file error" in diagnostics
+        ):
+            return {
+                "class": "engine_error",
+                "evidence": diagnostics.strip()[:400],
+                "hint": (
+                    "SaveFile/OpenFile native arguments are parsed as quoted "
+                    "strings only; a bare JavaScript expression produces an "
+                    'empty path — use var p = Argument["output"]; '
+                    'builder.SaveFile("docx", "jsValue(p)")'
+                ),
+            }
+        return {
+            "class": "engine_error",
+            "evidence": diagnostics.strip()[:400],
+        }
+    produced = {str(item.get("path", "")) for item in artifacts}
+    missing = [str(item) for item in expected_outputs if str(item) not in produced]
+    return {
+        "class": "missing_artifact",
+        "missing": missing,
+        "artifact_errors": list(artifact_errors),
+        "detail": (
+            "the engine reported success but did not produce every declared "
+            "output as a regular file"
+        ),
+    }
+
+
 def _run(args: argparse.Namespace) -> int:
     started = time.monotonic()
     try:
         script = _exact_input(args.script, WORK_ROOT, label="script")
+        misuse = bridge_misuse_findings(
+            script.read_text(encoding="utf-8", errors="replace")
+        )
+        if misuse:
+            raise ContractError(bridge_misuse_message(misuse))
         inputs = [_exact_artifact_input(item, label="input") for item in args.input]
         outputs = [
             _exact_output(item, label="output", require_absent=True)
@@ -439,6 +676,15 @@ def _run(args: argparse.Namespace) -> int:
         status = "failed"
         normalized_returncode = EXIT_ENGINE
 
+    failure = _classify_failure(
+        status=status,
+        engine_returncode=returncode,
+        stdout_text=stdout.decode("utf-8", errors="replace"),
+        stderr_text=stderr.decode("utf-8", errors="replace"),
+        expected_outputs=outputs,
+        artifacts=artifacts,
+        artifact_errors=artifact_errors,
+    )
     manifest = {
         "schema": "ai.neoharness.office.runtime-result.v1",
         "runtime_version": _version(),
@@ -452,6 +698,7 @@ def _run(args: argparse.Namespace) -> int:
         "expected_outputs": [str(item) for item in outputs],
         "artifacts": artifacts,
         "artifact_errors": artifact_errors,
+        "failure": failure,
         "diagnostics": {
             "stdout": stdout.decode("utf-8", errors="replace"),
             "stderr": stderr.decode("utf-8", errors="replace"),
@@ -478,7 +725,10 @@ def _run(args: argparse.Namespace) -> int:
     for error in artifact_errors:
         print(f"nh-office: {error}", file=sys.stderr)
 
-    print(json.dumps({"manifest": str(manifest_path), "status": status}, sort_keys=True))
+    summary: dict[str, object] = {"manifest": str(manifest_path), "status": status}
+    if failure is not None:
+        summary["failure_class"] = failure["class"]
+    print(json.dumps(summary, sort_keys=True))
     return normalized_returncode
 
 
@@ -490,8 +740,9 @@ def _parser() -> argparse.ArgumentParser:
         epilog=textwrap.dedent(
             """\
             Start here:
-              nh-document inspect /workspace/input/source.xlsx --json-output /workspace/work/inspection.json
+              nh-document inspect /workspace/input/source.xlsx --output /workspace/work/inspection.json
               nh-office examples xlsx-revise
+              nh-office examples docx-create
               nh-office run /workspace/work/edit.js \\
                 --input /workspace/input/source.xlsx \\
                 --output /workspace/output/candidate.xlsx \\
@@ -499,14 +750,20 @@ def _parser() -> argparse.ArgumentParser:
                 --manifest /workspace/output/edit-manifest.json
 
             Exact API references:
+              /opt/neoharness-office/share/api-reference/builder-host.js
               /opt/neoharness-office/share/api-reference/word-apiBuilder.js
               /opt/neoharness-office/share/api-reference/cell-apiBuilder.js
               /opt/neoharness-office/share/api-reference/slide-apiBuilder.js
               /opt/neoharness-office/share/api-reference/pdf-apiBuilder.js
 
-            Inspect the actual file and customize exact sheets, ranges, and
-            operations before running an example. Friendly download names are
-            supplied at publication time; workspace paths are internal.
+            builder-host.js documents the builder.* native command surface
+            (CreateFile/OpenFile/SaveFile/CloseFile/SetTmpFolder) and the
+            literal "jsValue(variableName)" dynamic-path bridge. Dynamic
+            paths never work as bare Argument.* expressions inside builder
+            calls. Inspect the actual file and customize exact sheets,
+            ranges, and operations before running an example. Friendly
+            download names are supplied at publication time; workspace paths
+            are internal.
             """
         ),
     )

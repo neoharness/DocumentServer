@@ -69,6 +69,8 @@ COPY neoharness/release/THIRD_PARTY_NOTICES.md \
     /opt/neoharness-office/share/licenses/THIRD_PARTY_NOTICES.md
 COPY neoharness/release/collect-runtime-licenses.py \
     /usr/local/libexec/collect-runtime-licenses
+COPY neoharness/runtime/share/api-reference/builder-host.js \
+    /opt/neoharness-office/share/api-reference/builder-host.js
 COPY sdkjs/word/apiBuilder.js \
     /opt/neoharness-office/share/api-reference/word-apiBuilder.js
 COPY sdkjs/cell/apiBuilder.js \
@@ -135,6 +137,8 @@ COPY neoharness/runtime/tests/test_document_helpers.py \
     /workspace/work/test_document_helpers.py
 COPY neoharness/runtime/tests/test_attestation.py \
     /workspace/work/test_attestation.py
+COPY neoharness/runtime/tests/test_nh_office_launcher.py \
+    /workspace/work/test_nh_office_launcher.py
 RUN /opt/neoharness-office/bin/nh-office run \
         /workspace/work/package-smoke.js \
         --output /workspace/output/package-smoke.docx \
@@ -157,6 +161,16 @@ RUN /opt/neoharness-office/bin/nh-office run \
         /opt/neoharness-office/documentserver/server/FileConverter/bin/font_selection.bin)" \
         -gt 1024 \
     && test "$(stat -c %s \
+        /opt/neoharness-office/share/api-reference/builder-host.js)" \
+        -gt 4096 \
+    && grep -q 'jsValue(variableName)' \
+        /opt/neoharness-office/share/api-reference/builder-host.js \
+    && /opt/neoharness-office/bin/nh-document inspect \
+        /workspace/output/package-smoke.docx \
+        --output /workspace/work/package-smoke-inspection.json \
+    && grep -q '"schema": "ai.neoharness.office.document-inspection.v1"' \
+        /workspace/work/package-smoke-inspection.json \
+    && test "$(stat -c %s \
         /opt/neoharness-office/share/api-reference/word-apiBuilder.js)" \
         -gt 100000 \
     && test "$(stat -c %s \
@@ -171,7 +185,8 @@ RUN /opt/neoharness-office/bin/nh-office run \
     && PYTHONPATH=/opt/neoharness-office/lib/python3 \
         python3 -m unittest -v \
             /workspace/work/test_document_helpers.py \
-            /workspace/work/test_attestation.py
+            /workspace/work/test_attestation.py \
+            /workspace/work/test_nh_office_launcher.py
 
 FROM ubuntu:24.04 AS artifacts
 

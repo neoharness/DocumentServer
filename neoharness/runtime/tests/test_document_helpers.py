@@ -20,7 +20,11 @@ from neoharness_office.images import (  # noqa: E402
     flatten,
     image_info,
 )
-from neoharness_office.inspectors import compare_files, inspect_file  # noqa: E402
+from neoharness_office.inspectors import (  # noqa: E402
+    _translate_formula,
+    compare_files,
+    inspect_file,
+)
 from neoharness_office.ocr import make_searchable_pdf  # noqa: E402
 from neoharness_office.ooxml import (  # noqa: E402
     OoxmlMutationError,
@@ -117,6 +121,26 @@ class DocumentHelperTests(unittest.TestCase):
             for name, data in (extra_parts or {}).items():
                 archive.writestr(name, data)
 
+    def _shared_formula_xlsx(self, path: Path, cells_xml: str) -> None:
+        """Minimal workbook whose only sheet carries the given formula cells."""
+
+        workbook = """<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <sheets><sheet name="Calc" sheetId="1" r:id="rId1"/></sheets>
+        </workbook>"""
+        rels = """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/>
+        </Relationships>"""
+        sheet = (
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            f"<sheetData>{cells_xml}</sheetData></worksheet>"
+        )
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", CONTENT_TYPES)
+            archive.writestr("xl/workbook.xml", workbook)
+            archive.writestr("xl/_rels/workbook.xml.rels", rels)
+            archive.writestr("xl/worksheets/sheet1.xml", sheet)
+
     def _docx(self, path: Path, *, macro: bytes | None = None) -> None:
         document = """<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
           xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">
@@ -200,7 +224,7 @@ class DocumentHelperTests(unittest.TestCase):
         self.assertIn("xl/worksheets/sheet1.xml", package["changed_parts"])
         self.assertTrue(package["macro_parts"][0]["preserved"])
         self.assertEqual(
-            result["schema"], "ai.neoharness.office.document-comparison.v2"
+            result["schema"], "ai.neoharness.office.document-comparison.v3"
         )
         self.assertEqual(result["spreadsheet"]["formulas"]["count"], 0)
 
@@ -239,6 +263,111 @@ class DocumentHelperTests(unittest.TestCase):
             ("xl/printerSettings/printerSettings1.bin", "removed"),
             {(item["part"], item["change"]) for item in sensitive},
         )
+
+    def test_boundary_errors_name_the_offending_path(self) -> None:
+        # A relative path with three path-bearing arguments used to produce
+        # "file path must be absolute beneath /workspace" with no clue which
+        # argument was wrong; the offending value is now part of the message.
+        with self.assertRaisesRegex(
+            Exception, r"must be absolute beneath /workspace: got 'plan\.json'"
+        ):
+            exact_read_file("plan.json")
+
+    def test_formula_translation_shifts_only_unanchored_references(self) -> None:
+        self.assertEqual(_translate_formula("A1+$B$2", "C3", "D5"), "B3+$B$2")
+        self.assertEqual(_translate_formula("$A1+B$2", "C3", "D5"), "$A3+C$2")
+        self.assertEqual(
+            _translate_formula("SUM(A1:B2)*2", "C3", "C4"), "SUM(A2:B3)*2"
+        )
+        # Sheet-qualified relative references shift; quoted names, string
+        # literals, structured references, and function names never do.
+        self.assertEqual(
+            _translate_formula("'My A1 Sheet'!A1+Sheet2!B2", "C3", "D5"),
+            "'My A1 Sheet'!B3+Sheet2!C4",
+        )
+        self.assertEqual(
+            _translate_formula('IF(A1="B2",1,0)', "C3", "C4"), 'IF(A2="B2",1,0)'
+        )
+        self.assertEqual(
+            _translate_formula("LOG10(A1)", "C3", "C4"), "LOG10(A2)"
+        )
+        self.assertEqual(
+            _translate_formula("SUM(Table1[Col A1])", "C3", "C4"),
+            "SUM(Table1[Col A1])",
+        )
+        # A translation that leaves the grid reports None instead of guessing.
+        self.assertIsNone(_translate_formula("A1", "B2", "A1"))
+
+    def test_shared_formula_reindexing_is_normalization_not_change(self) -> None:
+        before = self.root / "shared-before.xlsx"
+        after = self.root / "shared-after.xlsx"
+        # Master B2 with followers B3/B4 sharing one index.
+        self._shared_formula_xlsx(
+            before,
+            '<row r="2"><c r="B2"><f t="shared" ref="B2:B4" si="0">A2*2</f><v>2</v></c></row>'
+            '<row r="3"><c r="B3"><f t="shared" si="0"/><v>4</v></c></row>'
+            '<row r="4"><c r="B4"><f t="shared" si="0"/><v>6</v></c></row>',
+        )
+        # Same effective formulas after a round trip: B2 became explicit, the
+        # master moved to B3 under a new index and span.
+        self._shared_formula_xlsx(
+            after,
+            '<row r="2"><c r="B2"><f>A2*2</f><v>2</v></c></row>'
+            '<row r="3"><c r="B3"><f t="shared" ref="B3:B4" si="7">A3*2</f><v>4</v></c></row>'
+            '<row r="4"><c r="B4"><f t="shared" si="7"/><v>6</v></c></row>',
+        )
+        spreadsheet = compare_files(before, after)["spreadsheet"]
+        self.assertEqual(spreadsheet["formulas"]["count"], 0)
+        normalizations = spreadsheet["formula_normalizations"]
+        self.assertEqual(normalizations["count"], 3)
+        by_cell = {item["cell"]: item for item in normalizations["changes"]}
+        self.assertEqual(by_cell["B2"]["before_storage"], "shared_master")
+        self.assertEqual(by_cell["B2"]["after_storage"], "explicit")
+        self.assertEqual(by_cell["B3"]["before_storage"], "shared_follower")
+        self.assertEqual(by_cell["B3"]["after_storage"], "shared_master")
+        self.assertEqual(by_cell["B4"]["shared_index_before"], "0")
+        self.assertEqual(by_cell["B4"]["shared_index_after"], "7")
+        self.assertEqual(by_cell["B4"]["effective"], "A4*2")
+
+    def test_true_formula_change_stays_high_salience_amid_reshuffling(self) -> None:
+        before = self.root / "true-before.xlsx"
+        after = self.root / "true-after.xlsx"
+        self._shared_formula_xlsx(
+            before,
+            '<row r="2"><c r="B2"><f t="shared" ref="B2:B3" si="0">A2*2</f><v>2</v></c></row>'
+            '<row r="3"><c r="B3"><f t="shared" si="0"/><v>4</v></c></row>',
+        )
+        # B2 keeps its effective formula through a reshuffle; B3 genuinely
+        # changes from A3*2 to A3*9.
+        self._shared_formula_xlsx(
+            after,
+            '<row r="2"><c r="B2"><f>A2*2</f><v>2</v></c></row>'
+            '<row r="3"><c r="B3"><f>A3*9</f><v>36</v></c></row>',
+        )
+        spreadsheet = compare_files(before, after)["spreadsheet"]
+        self.assertEqual(spreadsheet["formula_normalizations"]["count"], 1)
+        self.assertEqual(spreadsheet["formulas"]["count"], 1)
+        change = spreadsheet["formulas"]["changes"][0]
+        self.assertEqual(change["cell"], "B3")
+        self.assertEqual(change["before"]["effective"], "A3*2")
+        self.assertEqual(change["after"]["effective"], "A3*9")
+
+    def test_orphaned_shared_follower_falls_back_to_visible_change(self) -> None:
+        before = self.root / "orphan-before.xlsx"
+        after = self.root / "orphan-after.xlsx"
+        self._shared_formula_xlsx(
+            before,
+            '<row r="2"><c r="B2"><f>A2*2</f><v>2</v></c></row>',
+        )
+        # A follower whose master is missing cannot resolve an effective
+        # formula; the comparison must surface it rather than hide it.
+        self._shared_formula_xlsx(
+            after,
+            '<row r="2"><c r="B2"><f t="shared" si="3"/><v>2</v></c></row>',
+        )
+        spreadsheet = compare_files(before, after)["spreadsheet"]
+        self.assertEqual(spreadsheet["formulas"]["count"], 1)
+        self.assertEqual(spreadsheet["formula_normalizations"]["count"], 0)
 
     def test_surgical_docx_operations_preserve_macro_and_target_exact_state(
         self,

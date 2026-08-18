@@ -77,14 +77,30 @@ execution begins, and the broker also recognizes unchanged outputs from prior
 approved finalizers. It rejects unsealed working-document inputs, including a
 lossy serializer's output reopened only to acquire native provenance.
 
-Raw, version-matched API Builder sources are installed at:
+Raw, version-matched API references are installed at:
 
 ```text
+/opt/neoharness-office/share/api-reference/builder-host.js
 /opt/neoharness-office/share/api-reference/word-apiBuilder.js
 /opt/neoharness-office/share/api-reference/cell-apiBuilder.js
 /opt/neoharness-office/share/api-reference/slide-apiBuilder.js
 /opt/neoharness-office/share/api-reference/pdf-apiBuilder.js
 ```
+
+`builder-host.js` documents the `builder.*` native command surface
+(`CreateFile`/`OpenFile`/`SaveFile`/`CloseFile`/`SetTmpFolder`/`WriteData`),
+the engine's line-based chunking semantics, and the literal
+`"jsValue(variableName)"` dynamic-path bridge. The `*-apiBuilder.js` files
+describe editor objects only; the host commands are not in them. Dynamic
+paths must cross the host boundary through the quoted `jsValue` bridge —
+never as bare `Argument.*` expressions inside a `builder.*()` call, which
+`nh-office run` now refuses before any engine launch with the exact
+corrective syntax. `nh-office examples` provides both `*-revise` and
+`*-create` starters for docx, xlsx, pptx, and pdf. Failed runs classify
+themselves in the manifest `failure` object (`timeout`,
+`terminated_by_signal`, `engine_silent_failure`, `js_exception`,
+`engine_error`, `missing_artifact`) using launcher-observable facts plus
+hints for mechanisms reproduced against this exact engine.
 
 Search those files for exact method signatures rather than guessing an API.
 Useful entry points include:
@@ -130,7 +146,13 @@ A representative cross-format operation can therefore:
   their macros. Verify that each `vbaProject.bin` remains byte-identical.
 - Do not fetch external OOXML relationships unless the user explicitly
   authorized that retrieval.
-- Compare exact package parts after a surgical change.
+- Compare exact package parts after a surgical change. `nh-document compare`
+  resolves shared formulas to effective per-cell text before semantic
+  comparison: `spreadsheet.formulas` carries true effective-formula changes,
+  while `spreadsheet.formula_normalizations` separately reports shared
+  master/index/ref reshuffles whose effective formulas are unchanged, so
+  renormalization noise can never hide a real change
+  (`ai.neoharness.office.document-comparison.v3`).
 - Render the relevant before/after pages when layout matters.
 - Validate the requested semantic change separately from visual fidelity.
 - Keep successful artifacts even when a sibling operation fails.
